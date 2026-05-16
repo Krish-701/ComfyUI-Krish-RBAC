@@ -64,11 +64,13 @@ It replaces the older Sentinel system with a faster, cleaner, more modular archi
 ## Key Features
 
 ### 🔐 **RBAC Security**
-Four roles: **Admin, Power, User, Guest**  
+Four roles: **Admin, Power, User, Guest**
 Each with configurable permissions stored in `usgromana_groups.json`.
 
+The guest account and login can be disabled by editing `config.json` and changing `enable_guest_account` to false
+
 <p align="center">
-  <img src="./readme/UsgromanaLogin.png" />
+  <img src="./readme/images/UsgromanaLogin.png" />
 </p>
 
 ### 🚫 **Save & Delete Workflow Blocking**
@@ -79,7 +81,7 @@ Non‑privileged roles cannot:
 - Delete workflow files  
 
 <p align="center">
-  <img src="./readme/AdminGroups.png" />
+  <img src="./readme/images/AdminGroups.png" />
 </p>
 
 All blocked actions trigger:
@@ -112,7 +114,7 @@ From `user_env.py`:
 - Toggle gallery‑folder mode
 
 <p align="center">
-  <img src="./readme/UserFiles.png" />
+  <img src="./readme/images/UserFiles.png" />
 </p>
 
 ### 🖥️ **Transparent Themed Admin UI**
@@ -292,8 +294,10 @@ Configuration is read from `config.json` in the extension root. All paths are re
 | `seperate_users` | Per-user folder isolation (note: config key spelling kept for compatibility) | `true` |
 | `manager_admin_only` | Restrict manager to admins | `true` |
 | `auto_enable_comfy_assets` | Enable ComfyUI assets in prestartup (no CLI flag) | `true` |
+| `enable_guest_account` | Allow guest user creation and guest login | `true` |
 
-Set `auto_enable_comfy_assets` to `false` if you manage `--enable-assets` yourself on the ComfyUI command line.
+Set `auto_enable_comfy_assets` to `false` if you manage `--enable-assets` yourself on the ComfyUI command line.  
+Set `enable_guest_account` to `false` to disable guest registration and guest login (existing guest JWTs remain valid until expiry).
 
 ---
 

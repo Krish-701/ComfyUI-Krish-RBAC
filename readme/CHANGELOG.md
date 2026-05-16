@@ -37,6 +37,7 @@ This project follows a semantic-style versioning flow adapted for active develop
 
 ### 🐛 Fixes & Config
 - **`auto_enable_comfy_assets`** — New `config.json` key (default `true`) to control prestartup assets enablement
+- **`enable_guest_account`** — Optional guest user creation and guest login (merged from `main`; default `true`)
 - **Sanitizer scope** — Documented: form POST and query params only; JSON bodies are not sanitized
 
 ---

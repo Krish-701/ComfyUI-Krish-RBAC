@@ -12,5 +12,6 @@
     "force_https": false,
     "seperate_users": true,
     "manager_admin_only": true,
-    "auto_enable_comfy_assets": true
+    "auto_enable_comfy_assets": true,
+    "enable_guest_account": true
 }

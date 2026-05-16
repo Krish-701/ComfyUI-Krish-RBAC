@@ -3,7 +3,7 @@ import os
 import uuid
 from aiohttp import web
 from ..globals import routes, users_db, jwt_auth, logger, timeout
-from ..constants import HTML_DIR
+from ..constants import HTML_DIR, ENABLE_GUEST_ACCOUNT
 from ..utils.bootstrap import ensure_guest_user, ensure_groups_config
 from ..utils.ip_filter import get_ip
 from ..utils import user_env
@@ -70,7 +70,8 @@ async def post_login(request: web.Request) -> web.Response:
     if str(sanitized_data.get("guest_login", "false")).lower() == "true":
         ensure_guest_user()
         guest_id, _ = users_db.get_user("guest")
-        if not guest_id: return web.json_response({"error": "Guest disabled"}, status=500)
+        if not guest_id or not ENABLE_GUEST_ACCOUNT: 
+            return web.json_response({"error": "Guest disabled"}, status=500)
         
         user_env.get_user_workflow_dir("guest")
         
