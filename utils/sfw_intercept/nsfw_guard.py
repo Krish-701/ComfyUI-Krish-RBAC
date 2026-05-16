@@ -518,6 +518,37 @@ def clear_nsfw_tag(path: str):
     except Exception as e:
         print(f"[Usgromana::NSFWGuard] Warning: Could not clear metadata from {path}: {e}")
 
+def tag_output_images_from_history(history_result: dict) -> None:
+    """
+    Scan and cache NSFW metadata on generated files immediately after a prompt,
+    before ComfyUI's asset enricher runs (avoids mtime races during enrichment).
+    """
+    if not history_result or not is_sfw_enforced_for_current_session(quiet=True):
+        return
+    try:
+        from ..media_paths import resolve_output_file_path
+    except ImportError:
+        return
+
+    outputs = history_result.get("outputs") or {}
+    seen: set[str] = set()
+    for node_out in outputs.values():
+        if not isinstance(node_out, dict):
+            continue
+        for key in ("images", "gifs"):
+            for img in node_out.get(key) or []:
+                if not isinstance(img, dict):
+                    continue
+                filename = img.get("filename")
+                if not filename or filename in seen:
+                    continue
+                seen.add(filename)
+                subfolder = (img.get("subfolder") or "").strip()
+                path = resolve_output_file_path(filename, subfolder or None)
+                if path:
+                    should_block_image_for_current_user(path, quiet=True, use_cache=True)
+
+
 def set_latest_prompt_user(username: str | None):
     """
     Always update the worker-context username for the latest prompt.
@@ -528,10 +559,10 @@ def set_latest_prompt_user(username: str | None):
     global _LATEST_PROMPT_USER
 
     effective = username or "guest"
+    prev = _LATEST_PROMPT_USER
     _LATEST_PROMPT_USER = effective
-
-    # Debug so we can see it changing per prompt:
-    print(f"[Usgromana::NSFWGuard] set_latest_prompt_user → {effective!r}")
+    if prev != effective:
+        print(f"[Usgromana::NSFWGuard] set_latest_prompt_user → {effective!r}")
 
 
 @lru_cache(maxsize=1)
@@ -707,27 +738,26 @@ def is_sfw_enforced_for_current_session(quiet: bool = False) -> bool:
         return cached_flag
 
     # 4. Check Database (cache miss)
-    sfw_flag = True  # default BLOCK
-    if username:
+    # Guest / anonymous: always enforce. Registered users: when sfw_check is true (default on).
+    if not username or str(username).lower() == "guest":
+        sfw_flag = True
+        _SFW_CACHE[cache_key] = (sfw_flag, username or "guest")
+    elif username:
         _, rec = users_db.get_user(username)
         if rec is not None:
-            sfw_flag = rec.get("sfw_check", True)
-            # Cache the result
+            sfw_flag = bool(rec.get("sfw_check", True))
             _SFW_CACHE[cache_key] = (sfw_flag, username)
-            # Only log on first check for this user, unless quiet mode
-            if not quiet:
-                if _LAST_LOGGED_USER != cache_key:
-                    print(f"[Usgromana] 🛡️ Policy Check: User='{username}' | SFW={sfw_flag}")
-                    _LAST_LOGGED_USER = cache_key
+            if not quiet and _LAST_LOGGED_USER != cache_key:
+                print(f"[Usgromana] Policy check: user={username!r} sfw_check={sfw_flag}")
+                _LAST_LOGGED_USER = cache_key
         else:
-            # Cache the default
+            sfw_flag = False
             _SFW_CACHE[cache_key] = (sfw_flag, username)
-            if not quiet:
-                if _LAST_LOGGED_USER != cache_key:
-                    print(f"[Usgromana] ⚠️ User '{username}' not found in DB. Defaulting to BLOCK.")
-                    _LAST_LOGGED_USER = cache_key
+            if not quiet and _LAST_LOGGED_USER != cache_key:
+                print(f"[Usgromana] User {username!r} not in DB; SFW filter off for gallery/view.")
+                _LAST_LOGGED_USER = cache_key
     else:
-        # Cache the default for None/guest
+        sfw_flag = True
         _SFW_CACHE[cache_key] = (sfw_flag, "guest")
     
     return sfw_flag
