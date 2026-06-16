@@ -455,4 +455,8 @@ async function generate(event) {
   }
 }
 
-loadTimeoutFromStorage(window.location.pathname.replace("/", "").split("_")[0])
+(function () {
+  const page = window.location.pathname.replace(/^\//, "").split("/").pop();
+  const action = page === "generate_token" ? "generate" : page.split("_")[0];
+  loadTimeoutFromStorage(action);
+})();

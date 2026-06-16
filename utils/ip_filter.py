@@ -129,6 +129,25 @@ class IPFilter:
 
         return True
 
+    def is_whitelisted(self, ip: str) -> bool:
+        """True when a whitelist is configured and the IP matches an entry."""
+        self.load_filter_list()
+        if not self.whitelist:
+            return False
+
+        try:
+            ip_addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+
+        for entry in self.whitelist:
+            if isinstance(entry, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
+                if ip_addr in entry:
+                    return True
+            elif ip_addr == entry:
+                return True
+        return False
+
     def add_to_blacklist(self, ip: str) -> None:
         """Add a given IP to the blacklist file."""
         try:

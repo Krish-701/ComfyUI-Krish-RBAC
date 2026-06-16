@@ -122,12 +122,14 @@ if FORCE_HTTPS:
 app.middlewares.append(ip_filter.create_ip_filter_middleware())
 app.middlewares.append(sanitizer.create_sanitizer_middleware())
 app.middlewares.append(
-    timeout.create_time_out_middleware(limited=("/login", "/register"))
+    timeout.create_time_out_middleware(
+        limited=("/login", "/register", "/generate_token")
+    )
 )
 
 # IMPORTANT: run JWT auth BEFORE we try to read request.user in workflow_interceptor
 app.middlewares.append(jwt_auth.create_jwt_middleware(
-    public=("/login", "/logout", "/register"),
+    public=("/login", "/logout", "/register", "/generate_token"),
     public_prefixes=("/usgromana", "/usgromana-gallery", "/assets", "/static"),
 ))
 
