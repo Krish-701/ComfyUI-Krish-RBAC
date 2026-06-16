@@ -5,6 +5,30 @@ This project follows a semantic-style versioning flow adapted for active develop
 
 ---
 
+## **v2.0.2 — Auth, API Tokens & IP Auto-Blacklist (2026-06-15)**
+
+### 🔑 Authentication & API Tokens
+- **Restored API token generation** — `GET`/`POST` `/generate_token` and redirect alias `/usgromana/generate_token`
+- **Login page fixes** — corrected HTML markup, asset fallbacks, and link to token page
+- **Middleware** — token routes added to JWT public routes and auth timeout middleware
+- **Frontend** — fixed generate-page timeout/action detection in `auth.js`
+
+### 🌐 IP Rules & Security
+- **Auto-blacklist setting** — new control in **IP Rules** tab: failed attempts before IP is added to blacklist (default **0** = disabled)
+- **Live config** — threshold saved to `config.json` via `/usgromana/api/ip-lists` and applied without restart
+- **`utils/runtime_config.py`** — runtime read/write for mutable config values
+- **`is_whitelisted()`** — whitelisted IPs exempt from auto-blacklist on failed auth
+
+### 📄 Documentation
+- README, CHANGELOG, and login page updated to reflect v2.0.2 as the current release
+
+---
+
+## **v2.0.1 — Version Bump (2026-05-27)**
+- Bumped package version from 2.0.0 to 2.0.1 in `pyproject.toml`
+
+---
+
 ## **v2.0.0 — ComfyUI Assets Integration & Multi-User Bridge (2026-05-16)**
 ### 🎨 ComfyUI Assets & Generated Tab
 - **Automatic assets enablement** — `prestartup_script.py` and `utils/enable_comfy_assets.py` turn on ComfyUI’s assets system without requiring `--enable-assets` on the CLI

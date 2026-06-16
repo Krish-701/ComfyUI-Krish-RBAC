@@ -18,9 +18,7 @@ class Timeout:
 
     def add_failed_attempt(self, ip: str) -> None:
         """Add a failed attempt for a given IP and set timeout or blacklist IP if necessary."""
-        whitelist, _ = self.ip_filter.load_filter_list()
-
-        if ip in whitelist:
+        if self.ip_filter.is_whitelisted(ip):
             return
 
         self._failed_attempts_ip[ip] = self._failed_attempts_ip.get(ip, 0) + 1

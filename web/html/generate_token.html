@@ -6,14 +6,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ComfyUI Usgromana - Generate API Token</title>
 
-    <link rel="icon" href="/usgromana/assets/icon.ico" type="image/x-icon">
+    <link rel="icon" href="/usgromana/assets/light_icon.ico" type="image/x-icon">
 
     <link rel="stylesheet" type="text/css" href="/usgromana/css/styles.css">
 </head>
 
-<body">
+<body>
     <div class="container">
-        <img class="logo" src="/usgromana/assets/logo_transparent.png" alt="Transparent Logo">
+        <picture>
+            <source srcset="/usgromana/assets/dark_logo_transparent.png"
+                    media="(prefers-color-scheme: dark)">
+            <source srcset="/usgromana/assets/light_logo_transparent.png"
+                    media="(prefers-color-scheme: light)">
+            <img class="logo"
+                src="/usgromana/assets/logo_transparent.png"
+                alt="USG Logo">
+        </picture>
         <h1 class="title generate">Generate Token</h1>
         <form id="generate-form" onsubmit="generate(event)">
             <div class="form-field">
@@ -26,7 +34,7 @@
             </div>
             <div class="form-field">
                 <label for="expire_hours">Expiration (in hours):</label>
-                <input type="integer" id="expire_hours" name="expire_hours" value="720" required>
+                <input type="number" id="expire_hours" name="expire_hours" value="720" min="1" required>
             </div>
             <div class="form-field" id="login-link">
                 <a href="/login">Back to Login</a>
@@ -35,7 +43,7 @@
         </form>
     </div>
     <div class="toast-container" id="toasts"></div>
-    </body>
     <script src="/usgromana/js/auth.js"></script>
+</body>
 
 </html>

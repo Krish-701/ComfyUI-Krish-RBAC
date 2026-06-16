@@ -55,7 +55,7 @@ LOG_LEVELS = config.get("log_levels", ["INFO"])
 WHITELIST = WHITELIST_FILE
 BLACKLIST = BLACKLIST_FILE
 
-BLACKLIST_AFTER_ATTEMPTS = config.get("blacklist_after_attempts")
+BLACKLIST_AFTER_ATTEMPTS = config.get("blacklist_after_attempts", 0)
 
 FREE_MEMORY_ON_LOGOUT = config.get("free_memory_on_logout", False)
 FORCE_HTTPS = config.get("force_https", False)

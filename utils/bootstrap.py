@@ -1,12 +1,7 @@
 # --- START OF FILE utils/bootstrap.py ---
 import os
 import uuid
-from ..constants import (
-    USERS_FILE,
-    GROUPS_CONFIG_FILE,
-    DEFAULT_GROUP_CONFIG_PATH,
-    ENABLE_GUEST_ACCOUNT,
-)
+from ..constants import USERS_FILE, GROUPS_CONFIG_FILE, DEFAULT_GROUP_CONFIG_PATH
 from .ui_defaults import ensure_ui_defaults_config
 from .json_utils import load_json_file, save_json_file
 from .admin_logic import patch_user_group
@@ -57,11 +52,6 @@ def ensure_guest_user():
 
     if guest_id is not None:
         patch_user_group("guest", ["guest"], False)
-        return
-
-    # No guest account configured, and ENABLE is turned off,
-    # Don't do the creation
-    if guest_id is None and not ENABLE_GUEST_ACCOUNT:
         return
 
     try:

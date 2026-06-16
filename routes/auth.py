@@ -3,7 +3,7 @@ import os
 import uuid
 from aiohttp import web
 from ..globals import routes, users_db, jwt_auth, logger, timeout
-from ..constants import HTML_DIR, ENABLE_GUEST_ACCOUNT
+from ..constants import HTML_DIR, MAX_TOKEN_EXPIRE_MINUTES, TOKEN_EXPIRE_MINUTES
 from ..utils.bootstrap import ensure_guest_user, ensure_groups_config
 from ..utils.ip_filter import get_ip
 from ..utils import user_env
@@ -70,8 +70,7 @@ async def post_login(request: web.Request) -> web.Response:
     if str(sanitized_data.get("guest_login", "false")).lower() == "true":
         ensure_guest_user()
         guest_id, _ = users_db.get_user("guest")
-        if not guest_id or not ENABLE_GUEST_ACCOUNT: 
-            return web.json_response({"error": "Guest disabled"}, status=500)
+        if not guest_id: return web.json_response({"error": "Guest disabled"}, status=500)
         
         user_env.get_user_workflow_dir("guest")
         
@@ -101,6 +100,87 @@ async def post_login(request: web.Request) -> web.Response:
 
     timeout.add_failed_attempt(ip)
     return web.json_response({"error": "Invalid credentials"}, status=401)
+
+@routes.get("/generate_token")
+async def get_generate_token(request: web.Request) -> web.Response:
+    if not users_db.load_users():
+        return web.HTTPFound("/register")
+    if jwt_auth.get_token_from_request(request):
+        return web.HTTPFound("/logout")
+    path = os.path.join(HTML_DIR, "generate_token.html")
+    return (
+        web.FileResponse(path)
+        if os.path.exists(path)
+        else web.Response(text="generate_token.html not found", status=404)
+    )
+
+
+@routes.get("/usgromana/generate_token")
+async def get_generate_token_alias(request: web.Request) -> web.Response:
+    return web.HTTPFound("/generate_token")
+
+
+@routes.post("/generate_token")
+async def post_generate_token(request: web.Request) -> web.Response:
+    sanitized_data = request.get("_sanitized_data", {})
+    ip = get_ip(request)
+    username = sanitized_data.get("username")
+    password = sanitized_data.get("password")
+
+    try:
+        expire_hours = int(
+            sanitized_data.get("expire_hours", TOKEN_EXPIRE_MINUTES / 60)
+        )
+    except (TypeError, ValueError):
+        return web.json_response(
+            {"error": "Expiration hours must be a number"},
+            status=400,
+        )
+
+    max_expire_hours = MAX_TOKEN_EXPIRE_MINUTES / 60
+    if expire_hours > max_expire_hours:
+        return web.json_response(
+            {
+                "error": f"Expiration hours must be smaller than {max_expire_hours}"
+            },
+            status=400,
+        )
+
+    if not username or not password:
+        return web.json_response(
+            {"error": "Missing login credentials (username and password)"},
+            status=400,
+        )
+
+    if users_db.check_username_password(username, password):
+        timeout.remove_failed_attempts(ip)
+
+        user_id, _ = users_db.get_user(username)
+        token = jwt_auth.create_access_token(
+            {"id": user_id, "username": username},
+            expire_minutes=expire_hours * 60,
+        )
+        secure_flag = request.headers.get("X-Forwarded-Proto", "http") == "https"
+        response = web.json_response(
+            {
+                "message": "JWT Token successfully generated",
+                "jwt_token": token,
+            }
+        )
+        response.set_cookie(
+            "jwt_token",
+            token,
+            httponly=True,
+            secure=secure_flag,
+            samesite="Strict",
+        )
+        logger.generate_success(ip, username, expire_hours)
+        return response
+
+    logger.generate_attempt(ip, username, password, expire_hours)
+    timeout.add_failed_attempt(ip)
+    return web.json_response({"error": "Invalid username or password"}, status=401)
+
 
 @routes.get("/logout")
 async def get_logout(request: web.Request) -> web.Response:

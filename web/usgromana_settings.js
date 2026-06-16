@@ -1016,6 +1016,25 @@ renderUsers(list, container) {
                     Configure IP-based access rules. Whitelisted IPs are always allowed,
                     blacklisted IPs are always denied (before other checks).
                 </p>
+                <div class="usgromana-row" style="margin-bottom:12px;">
+                    <div>
+                        <label class="usgromana-field-label" for="usgromana-ip-blacklist-after">
+                            Auto-blacklist after failed login attempts
+                        </label>
+                        <input
+                            type="number"
+                            id="usgromana-ip-blacklist-after"
+                            class="usgromana-input"
+                            min="0"
+                            step="1"
+                            value="0"
+                        />
+                        <p style="margin-top:6px;font-size:12px;color:#9aa0a6;">
+                            Set to <strong>0</strong> to never add IPs to the blacklist automatically.
+                            Applies to failed login, registration, and API token generation.
+                        </p>
+                    </div>
+                </div>
                 <div class="usgromana-row">
                     <div>
                         <label class="usgromana-field-label">
@@ -1039,6 +1058,7 @@ renderUsers(list, container) {
 
         const wlEl = container.querySelector("#usgromana-ip-whitelist");
         const blEl = container.querySelector("#usgromana-ip-blacklist");
+        const blacklistAfterEl = container.querySelector("#usgromana-ip-blacklist-after");
         const refreshBtn = container.querySelector("#usgromana-ip-refresh");
         const saveBtn = container.querySelector("#usgromana-ip-save");
 
@@ -1048,6 +1068,7 @@ renderUsers(list, container) {
             const blacklist = (data?.blacklist || []).join("\n");
             wlEl.value = whitelist;
             blEl.value = blacklist;
+            blacklistAfterEl.value = Number(data?.blacklist_after_attempts ?? 0);
         }
 
         await loadIpConfig();
@@ -1063,13 +1084,29 @@ renderUsers(list, container) {
                 .split(/\r?\n/)
                 .map(l => l.trim())
                 .filter(l => l.length > 0);
+            const blacklistAfterAttempts = parseInt(blacklistAfterEl.value, 10);
+
+            if (
+                Number.isNaN(blacklistAfterAttempts) ||
+                blacklistAfterAttempts < 0 ||
+                !Number.isInteger(blacklistAfterAttempts)
+            ) {
+                window.alert(
+                    "Auto-blacklist attempts must be a whole number greater than or equal to 0."
+                );
+                return;
+            }
 
             saveBtn.disabled = true;
             saveBtn.textContent = "Saving...";
             try {
                 await api.fetchApi(IP_API_ENDPOINT, {
                     method: "PUT",
-                    body: JSON.stringify({ whitelist, blacklist }),
+                    body: JSON.stringify({
+                        whitelist,
+                        blacklist,
+                        blacklist_after_attempts: blacklistAfterAttempts,
+                    }),
                 });
                 saveBtn.textContent = "Saved";
                 setTimeout(() => (saveBtn.textContent = "Save Rules"), 1200);

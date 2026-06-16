@@ -1,6 +1,10 @@
 # --- START OF FILE routes/admin.py ---
 from aiohttp import web
-from ..globals import routes, jwt_auth, users_db, ip_filter, logger
+from ..globals import routes, jwt_auth, users_db, ip_filter, logger, timeout
+from ..utils.runtime_config import (
+    get_blacklist_after_attempts,
+    set_blacklist_after_attempts,
+)
 from ..constants import GROUPS_CONFIG_FILE, DEFAULT_GROUP_CONFIG_PATH, WHITELIST_FILE, BLACKLIST_FILE, USERS_FILE
 from ..utils.json_utils import load_json_file, save_json_file
 from ..utils.admin_logic import patch_user_group, delete_user_record
@@ -166,7 +170,8 @@ async def api_ip_lists(request):
     whitelist, blacklist = ip_filter.load_filter_list()
     return web.json_response({
         "whitelist": [str(ip) for ip in (whitelist or [])],
-        "blacklist": [str(ip) for ip in (blacklist or [])]
+        "blacklist": [str(ip) for ip in (blacklist or [])],
+        "blacklist_after_attempts": get_blacklist_after_attempts(),
     })
 
 @routes.put("/usgromana/api/ip-lists")
@@ -215,8 +220,31 @@ async def api_update_ip_lists(request):
         
         # Reload the filter lists to update in-memory cache
         ip_filter.load_filter_list()
+
+        blacklist_after_attempts = data.get("blacklist_after_attempts")
+        if blacklist_after_attempts is not None:
+            try:
+                attempts = int(blacklist_after_attempts)
+            except (TypeError, ValueError):
+                return web.json_response(
+                    {"error": "blacklist_after_attempts must be a non-negative integer"},
+                    status=400,
+                )
+            if attempts < 0:
+                return web.json_response(
+                    {"error": "blacklist_after_attempts must be a non-negative integer"},
+                    status=400,
+                )
+            normalized = set_blacklist_after_attempts(attempts)
+            timeout.blacklist_after_attempts = normalized
+
         logger.info(f"[Audit] IP lists updated by {_admin_username(request)}")
-        return web.json_response({"status": "ok"})
+        return web.json_response(
+            {
+                "status": "ok",
+                "blacklist_after_attempts": get_blacklist_after_attempts(),
+            }
+        )
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
