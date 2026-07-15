@@ -33,15 +33,26 @@ async def post_register(request: web.Request) -> web.Response:
     is_first_admin = (admin_user[0] is None)
 
     if not is_first_admin:
-        if not users_db.check_username_password(username, password):
+        admin_id, _ = users_db.authenticate(username, password)
+        if not admin_id:
             timeout.add_failed_attempt(ip)
             return web.json_response({"error": "Invalid admin credentials"}, status=403)
 
-    if None not in users_db.get_user(new_username):
+    if users_db.get_user(new_username)[0] is not None:
         return web.json_response({"error": "Username exists"}, status=400)
 
+    new_email = (sanitized_data.get("new_user_email") or "").strip().lower() or None
+    if new_email and users_db.email_exists(new_email):
+        return web.json_response({"error": "Email already registered"}, status=400)
+
     new_user_id = str(uuid.uuid4())
-    users_db.add_user(new_user_id, new_username, new_password, is_first_admin)
+    users_db.add_user(
+        new_user_id,
+        new_username,
+        new_password,
+        is_first_admin,
+        email=new_email,
+    )
     sync_user_to_comfy_manager(new_user_id, new_username)
 
     # Create directory immediately
@@ -82,17 +93,25 @@ async def post_login(request: web.Request) -> web.Response:
         timeout.remove_failed_attempts(ip)
         return resp
 
-    username = sanitized_data.get("username")
+    login_id = sanitized_data.get("username")  # username OR email
     password = sanitized_data.get("password")
 
-    if users_db.check_username_password(username, password):
-        user_id, _ = users_db.get_user(username)
-        
+    user_id, user_rec = users_db.authenticate(login_id, password)
+    if user_id and user_rec:
+        username = user_rec.get("username") or login_id
+
         user_env.get_user_workflow_dir(username)
-        
+
         token = jwt_auth.create_access_token({"id": user_id, "username": username})
         sync_user_to_comfy_manager(user_id, username)
-        resp = web.json_response({"message": "Login successful", "jwt_token": token})
+        resp = web.json_response(
+            {
+                "message": "Login successful",
+                "jwt_token": token,
+                "username": username,
+                "email": user_rec.get("email"),
+            }
+        )
         resp.set_cookie("jwt_token", token, httponly=True, samesite="Strict")
         logger.login_success(ip, username)
         timeout.remove_failed_attempts(ip)
@@ -148,16 +167,18 @@ async def post_generate_token(request: web.Request) -> web.Response:
 
     if not username or not password:
         return web.json_response(
-            {"error": "Missing login credentials (username and password)"},
+            {
+                "error": "Missing login credentials (email/username and password)",
+            },
             status=400,
         )
 
-    if users_db.check_username_password(username, password):
+    user_id, user_rec = users_db.authenticate(username, password)
+    if user_id and user_rec:
         timeout.remove_failed_attempts(ip)
-
-        user_id, _ = users_db.get_user(username)
+        resolved_username = user_rec.get("username") or username
         token = jwt_auth.create_access_token(
-            {"id": user_id, "username": username},
+            {"id": user_id, "username": resolved_username},
             expire_minutes=expire_hours * 60,
         )
         secure_flag = request.headers.get("X-Forwarded-Proto", "http") == "https"
@@ -165,6 +186,7 @@ async def post_generate_token(request: web.Request) -> web.Response:
             {
                 "message": "JWT Token successfully generated",
                 "jwt_token": token,
+                "username": resolved_username,
             }
         )
         response.set_cookie(
@@ -174,12 +196,14 @@ async def post_generate_token(request: web.Request) -> web.Response:
             secure=secure_flag,
             samesite="Strict",
         )
-        logger.generate_success(ip, username, expire_hours)
+        logger.generate_success(ip, resolved_username, expire_hours)
         return response
 
     logger.generate_attempt(ip, username, password, expire_hours)
     timeout.add_failed_attempt(ip)
-    return web.json_response({"error": "Invalid username or password"}, status=401)
+    return web.json_response(
+        {"error": "Invalid email/username or password"}, status=401
+    )
 
 
 @routes.get("/logout")

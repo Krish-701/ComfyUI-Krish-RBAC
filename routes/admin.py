@@ -126,12 +126,109 @@ async def api_users(request):
     for u in iterable:
         users_list.append({
             "username": u.get("username", "unknown"),
+            "email": u.get("email") or "",
             "groups": [g.lower() for g in u.get("groups", ["user"])],
             "is_admin": u.get("admin", False),
             # NEW: per-user SFW flag; default = True (SFW enabled)
             "sfw_check": u.get("sfw_check", True),
         })
     return web.json_response({"users": users_list})
+
+
+@routes.post("/usgromana/api/users/bulk")
+async def api_users_bulk_import(request):
+    """
+    Admin bulk user import from CSV.
+
+    CSV format (header optional):
+      name,email,password,role
+    Example:
+      nkrishnan,nkrishnan@pixstone.com,Nkri@Sh12,user
+
+    Body options:
+      - multipart/form-data with field ``file`` (CSV upload)
+      - application/json: { "csv": "..." } or { "text": "..." }
+      - text/csv or text/plain raw body
+    """
+    if not is_admin(request):
+        return web.json_response({"error": "Admin only"}, status=403)
+
+    try:
+        from ..utils.bulk_users import import_users_from_csv_text
+        from ..utils.comfy_user_bridge import sync_user_to_comfy_manager
+        from ..utils import user_env
+
+        csv_text = ""
+        ctype = (request.content_type or "").lower()
+
+        if "multipart" in ctype or "form-data" in ctype:
+            reader = await request.multipart()
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                # Prefer file field named file/csv, else any file, else text fields
+                if part.filename:
+                    raw = await part.read(decode=False)
+                    csv_text = raw.decode("utf-8-sig", errors="replace")
+                    break
+                name = (part.name or "").lower()
+                if name in ("csv", "text", "content", "file"):
+                    csv_text = await part.text()
+                    if csv_text:
+                        break
+        elif "json" in ctype:
+            data = await request.json()
+            csv_text = data.get("csv") or data.get("text") or data.get("content") or ""
+            if not csv_text and isinstance(data.get("rows"), list):
+                # Allow pre-parsed rows as JSON
+                from ..utils.bulk_users import import_users_from_rows
+
+                result = import_users_from_rows(
+                    users_db,
+                    data["rows"],
+                    sync_comfy=sync_user_to_comfy_manager,
+                    ensure_workflow_dir=user_env.get_user_workflow_dir,
+                )
+                logger.info(
+                    f"[Audit] bulk user import (json rows) by {_admin_username(request)}: "
+                    f"created={result.get('created_count')} skipped={result.get('skipped_count')} "
+                    f"errors={result.get('error_count')}"
+                )
+                return web.json_response({"status": "ok", **result})
+        else:
+            csv_text = await request.text()
+
+        if not str(csv_text).strip():
+            return web.json_response(
+                {
+                    "error": "No CSV content provided",
+                    "format": "name,email,password,role",
+                    "example": "nkrishnan,nkrishnan@pixstone.com,Nkri@Sh12,user",
+                },
+                status=400,
+            )
+
+        result = import_users_from_csv_text(
+            users_db,
+            csv_text,
+            sync_comfy=sync_user_to_comfy_manager,
+            ensure_workflow_dir=user_env.get_user_workflow_dir,
+        )
+        # Force in-memory DB reload after bulk file writes
+        users_db.load_users()
+        logger.info(
+            f"[Audit] bulk user import by {_admin_username(request)}: "
+            f"created={result.get('created_count')} skipped={result.get('skipped_count')} "
+            f"errors={result.get('error_count')}"
+        )
+        return web.json_response({"status": "ok", **result})
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return web.json_response({"error": str(e)}, status=500)
+
 
 @routes.put("/usgromana/api/users/{target_user}")
 async def api_update_user_route(request):
@@ -318,4 +415,141 @@ async def api_nsfw_management(request):
         import traceback
         print(f"[Usgromana] NSFW management error: {e}")
         traceback.print_exc()
+        return web.json_response({"error": str(e)}, status=500)
+
+
+# ---------------------------------------------------------------------------
+# Workflow run log: who ran what, when, how many times
+# ---------------------------------------------------------------------------
+
+def _caller_identity(request):
+    """Return (username, user_id, is_admin) for the JWT caller."""
+    token = jwt_auth.get_token_from_request(request)
+    if not token:
+        return None, None, False
+    try:
+        p = jwt_auth.decode_access_token(token)
+        username = p.get("username")
+        user_id = p.get("id")
+        _, u = users_db.get_user(username=username) if username else (None, {})
+        admin = bool(u and (u.get("admin") or "admin" in [g.lower() for g in u.get("groups", [])]))
+        return username, user_id, admin
+    except Exception:
+        return None, None, False
+
+
+@routes.get("/usgromana/api/workflow-runs")
+async def api_workflow_runs(request):
+    """
+    List workflow execution history.
+
+    - Admins: all users (optional ?user= filter)
+    - Non-admins: only their own runs
+    Query: limit, offset, user, status
+    """
+    username, user_id, admin = _caller_identity(request)
+    if not username:
+        return web.json_response({"error": "Authentication required"}, status=401)
+
+    try:
+        from ..utils.workflow_run_log import get_run_log
+
+        q = request.rel_url.query
+        limit = int(q.get("limit", "100"))
+        offset = int(q.get("offset", "0"))
+        status = q.get("status") or None
+        filter_user = (q.get("user") or "").strip() or None
+
+        if not admin:
+            filter_user = username
+
+        result = get_run_log().list_runs(
+            username=filter_user,
+            limit=limit,
+            offset=offset,
+            status=status,
+        )
+        result["viewer"] = username
+        result["is_admin"] = admin
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.get("/usgromana/api/workflow-runs/stats")
+async def api_workflow_runs_stats(request):
+    """
+    Aggregated stats: how many workflows each user ran, top workflows, last run time.
+    Admins see everyone; users see only themselves.
+    """
+    username, user_id, admin = _caller_identity(request)
+    if not username:
+        return web.json_response({"error": "Authentication required"}, status=401)
+
+    try:
+        from ..utils.workflow_run_log import get_run_log
+
+        filter_user = None if admin else username
+        # Admin may filter to one user via ?user=
+        q_user = (request.rel_url.query.get("user") or "").strip()
+        if admin and q_user:
+            filter_user = q_user
+
+        stats = get_run_log().stats(username=filter_user)
+        stats["viewer"] = username
+        stats["is_admin"] = admin
+        return web.json_response(stats)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.get("/usgromana/api/workflow-runs/active")
+async def api_workflow_runs_active(request):
+    """
+    Currently queued/running prompts with runner username + workflow name.
+    Admins see all; users see only their own.
+    """
+    username, user_id, admin = _caller_identity(request)
+    if not username:
+        return web.json_response({"error": "Authentication required"}, status=401)
+
+    try:
+        from ..globals import access_control
+
+        active = access_control.get_active_runs_snapshot()
+        if not admin:
+            active = [
+                r
+                for r in active
+                if (r.get("username") or "").lower() == username.lower()
+                or r.get("user_id") == user_id
+            ]
+        return web.json_response(
+            {
+                "active": active,
+                "count": len(active),
+                "viewer": username,
+                "is_admin": admin,
+            }
+        )
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.delete("/usgromana/api/workflow-runs")
+async def api_workflow_runs_clear(request):
+    """Admin-only: clear run history (optional ?user= to clear one user)."""
+    if not is_admin(request):
+        return web.json_response({"error": "Admin only"}, status=403)
+    try:
+        from ..utils.workflow_run_log import get_run_log
+
+        filter_user = (request.rel_url.query.get("user") or "").strip() or None
+        removed = get_run_log().clear(username=filter_user)
+        logger.info(
+            f"[Audit] Workflow run log cleared by {_admin_username(request)} "
+            f"(user={filter_user or 'ALL'}, removed={removed})"
+        )
+        return web.json_response({"status": "ok", "removed": removed})
+    except Exception as e:
         return web.json_response({"error": str(e)}, status=500)

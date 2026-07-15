@@ -25,8 +25,10 @@
         <h1 class="title generate">Generate Token</h1>
         <form id="generate-form" onsubmit="generate(event)">
             <div class="form-field">
-                <label for="username">Username:</label>
-                <input type="text" id="username" name="username" required>
+                <label for="username">Email or Username:</label>
+                <input type="text" id="username" name="username" required
+                       placeholder="you@company.com"
+                       autocomplete="username">
             </div>
             <div class="form-field">
                 <label for="password">Password:</label>

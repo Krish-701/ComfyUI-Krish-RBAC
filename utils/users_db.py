@@ -100,15 +100,25 @@ class UsersDB:
     # Public API
     # ----------------------------
 
-    def add_user(self, id: str, username: str, password: str, admin: bool) -> None:
+    def add_user(
+        self,
+        id: str,
+        username: str,
+        password: str,
+        admin: bool,
+        email: str | None = None,
+        groups: list | None = None,
+    ) -> None:
         """
         Add a user to the database.
 
         Rules:
         - If this is the very first user and no admin exists → force admin + groups=["admin"]
         - Otherwise:
-          - if admin=True → groups=["admin"]
+          - if groups is provided → use it (admin flag derived if "admin" in groups)
+          - elif admin=True → groups=["admin"]
           - else → groups=["user"]
+        - Optional email is stored for login-by-email
         """
         self.load_users()
 
@@ -118,9 +128,17 @@ class UsersDB:
         # First user and no admin yet? Force admin.
         if not has_admin and len(self.users) == 0:
             admin = True
+            groups = ["admin"]
 
-        # Assign groups based on admin flag
-        if admin:
+        # Assign groups based on admin flag / explicit groups
+        if groups is not None:
+            groups = [str(g).lower().strip() for g in groups if str(g).strip()]
+            if not groups:
+                groups = ["admin"] if admin else ["user"]
+            admin = bool(admin) or ("admin" in groups)
+            if admin and "admin" not in groups:
+                groups = ["admin"]
+        elif admin:
             groups = ["admin"]
         else:
             groups = ["user"]
@@ -131,12 +149,18 @@ class UsersDB:
             "admin": bool(admin),
             "groups": groups,
         }
+        if email:
+            user["email"] = str(email).strip().lower()
 
         self.users[id] = user
         self.save_users(self.users)
 
     def get_user(self, username: str = "", user_id: str = "") -> tuple[str | None, dict]:
-        """Retrieve a user by username or user_id. Always returns (id, user_dict_or_empty)."""
+        """
+        Retrieve a user by username, email, or user_id.
+        Always returns (id, user_dict_or_empty).
+        Login identifier may be username OR email (case-insensitive for email).
+        """
         self.load_users()
 
         if user_id:
@@ -145,14 +169,46 @@ class UsersDB:
                 return user_id, user
             return None, {}
 
+        if not username:
+            return None, {}
+
+        key = str(username).strip()
+        key_lower = key.lower()
+
+        # Exact username match first
         for uid, user_data in self.users.items():
-            if user_data.get("username") == username:
+            if user_data.get("username") == key:
+                return uid, user_data
+
+        # Case-insensitive username
+        for uid, user_data in self.users.items():
+            if str(user_data.get("username", "")).lower() == key_lower:
+                return uid, user_data
+
+        # Email match (case-insensitive)
+        for uid, user_data in self.users.items():
+            email = user_data.get("email")
+            if email and str(email).strip().lower() == key_lower:
                 return uid, user_data
 
         return None, {}
 
+    def email_exists(self, email: str, exclude_user_id: str | None = None) -> bool:
+        """Return True if another account already uses this email."""
+        if not email:
+            return False
+        self.load_users()
+        target = str(email).strip().lower()
+        for uid, user_data in self.users.items():
+            if exclude_user_id and uid == exclude_user_id:
+                continue
+            stored = user_data.get("email")
+            if stored and str(stored).strip().lower() == target:
+                return True
+        return False
+
     def check_username_password(self, username: str, password: str) -> bool:
-        """Check if the username and password match."""
+        """Check credentials. ``username`` may be username or email."""
         user_id, user_data = self.get_user(username)
         if not user_id or not user_data:
             return False
@@ -160,6 +216,26 @@ class UsersDB:
         return bcrypt.checkpw(
             password.encode("utf-8"), user_data["password"].encode("utf-8")
         )
+
+    def authenticate(self, login: str, password: str) -> tuple[str | None, dict]:
+        """
+        Authenticate with username OR email + password.
+        Returns (user_id, user_dict) on success, else (None, {}).
+        """
+        if not login or not password:
+            return None, {}
+        user_id, user_data = self.get_user(login)
+        if not user_id or not user_data:
+            return None, {}
+        try:
+            ok = bcrypt.checkpw(
+                password.encode("utf-8"), user_data["password"].encode("utf-8")
+            )
+        except Exception:
+            return None, {}
+        if not ok:
+            return None, {}
+        return user_id, user_data
 
     def get_admin_user(self) -> tuple[str | None, dict] | None:
         """

@@ -41,6 +41,51 @@ def _usgromana_meta_from_queue_entry(entry):
     return {}, entry
 
 
+def _resolve_username_for_queue(users_db: UsersDB, user_key: str | None) -> str:
+    """Resolve display username from JWT user_id (UUID) or bare username."""
+    if not user_key:
+        return "guest"
+    try:
+        uid, rec = users_db.get_user(user_id=user_key)
+        if rec and rec.get("username"):
+            return rec["username"]
+        uid, rec = users_db.get_user(username=user_key)
+        if rec and rec.get("username"):
+            return rec["username"]
+    except Exception:
+        pass
+    return str(user_key)
+
+
+def _inject_runner_into_extra_data(item, username: str, workflow_name: str):
+    """
+    Put runner identity into prompt extra_data so metadata / PNG info
+    can show who ran the workflow.
+    Queue item shape: (priority, prompt_id, prompt, extra_data, outputs_to_execute, ...)
+    """
+    if not isinstance(item, tuple) or len(item) < 4:
+        return item
+    extra = item[3]
+    if not isinstance(extra, dict):
+        extra = {}
+    else:
+        extra = dict(extra)
+    extra["usgromana_username"] = username
+    extra["usgromana_workflow"] = workflow_name
+    nested = dict(extra.get("usgromana") or {})
+    nested["username"] = username
+    nested["workflow_name"] = workflow_name
+    extra["usgromana"] = nested
+    # Keep a human-readable note many UIs surface from extra_pnginfo
+    png = extra.get("extra_pnginfo")
+    if isinstance(png, dict):
+        png = dict(png)
+        png["usgromana_run_by"] = username
+        png["usgromana_workflow"] = workflow_name
+        extra["extra_pnginfo"] = png
+    return item[:3] + (extra,) + item[4:]
+
+
 def sanitize_prompt_tuple_for_api(prompt_tuple):
     """
     ComfyUI ``/api/jobs`` expects history prompt tuples with 5 elements
@@ -272,7 +317,10 @@ class AccessControl:
 
     def user_queue_put(self, item):
         current_user_id = self.get_current_user_id()
-        _, user_rec = self.users_db.get_user(current_user_id)
+        # get_user expects user_id= for UUIDs (JWT sets UUID, not username)
+        _, user_rec = self.users_db.get_user(user_id=current_user_id or "")
+        if not user_rec and current_user_id:
+            _, user_rec = self.users_db.get_user(username=current_user_id)
 
         if user_rec:
             if os.path.exists(self.groups_config_file):
@@ -288,10 +336,51 @@ class AccessControl:
                 except Exception:
                     pass
 
+        username = _resolve_username_for_queue(self.users_db, current_user_id)
+        from .workflow_run_log import WorkflowRunLog, get_run_log
+
+        parsed = WorkflowRunLog.extract_prompt_meta(item)
+        workflow_name = parsed.get("workflow_name") or "Unnamed workflow"
+        prompt_id = parsed.get("prompt_id")
+        node_count = parsed.get("node_count") or 0
+
+        # Tag extra_data so generated media / history can show the runner name
         if isinstance(item, tuple):
-            new_item = (*item, {"user_id": current_user_id})
+            item = _inject_runner_into_extra_data(item, username, workflow_name)
+            new_item = (
+                *item,
+                {
+                    "user_id": current_user_id,
+                    "username": username,
+                    "workflow_name": workflow_name,
+                },
+            )
         else:
-            new_item = (item, {"user_id": current_user_id})
+            new_item = (
+                item,
+                {
+                    "user_id": current_user_id,
+                    "username": username,
+                    "workflow_name": workflow_name,
+                },
+            )
+
+        try:
+            get_run_log().log_queued(
+                prompt_id=prompt_id,
+                user_id=current_user_id,
+                username=username,
+                workflow_name=workflow_name,
+                node_count=node_count,
+                status="queued",
+            )
+            print(
+                f"[Usgromana] Queue: user={username!r} workflow={workflow_name!r} "
+                f"prompt_id={prompt_id!r}"
+            )
+        except Exception as e:
+            print(f"[Usgromana] workflow run log (queue) failed: {e}")
+
         self.__prompt_queue_put(new_item)
 
     def user_queue_get(self, timeout=None):
@@ -305,6 +394,23 @@ class AccessControl:
             self.__prompt_queue.currently_running[task_id] = entry
             self.__prompt_queue.task_counter += 1
             self.server.queue_updated()
+
+            # Mark run as actively executing
+            try:
+                meta, body = _usgromana_meta_from_queue_entry(entry)
+                prompt_id = body[1] if isinstance(body, tuple) and len(body) > 1 else None
+                if prompt_id:
+                    from .workflow_run_log import get_run_log
+
+                    get_run_log().update_status(str(prompt_id), "running")
+                uname = meta.get("username") or _resolve_username_for_queue(
+                    self.users_db, meta.get("user_id")
+                )
+                wf = meta.get("workflow_name") or "Unnamed workflow"
+                print(f"[Usgromana] Running: user={uname!r} workflow={wf!r} prompt_id={prompt_id!r}")
+            except Exception as e:
+                print(f"[Usgromana] workflow run log (start) failed: {e}")
+
             return (entry, task_id)
 
     def user_queue_task_done(self, item_id, history_result, **kwargs):
@@ -330,12 +436,41 @@ class AccessControl:
                 }
 
             prompt_id = prompt_stored[1]
+            username = meta.get("username") or _resolve_username_for_queue(
+                self.users_db, meta.get("user_id")
+            )
+            workflow_name = meta.get("workflow_name") or "Unnamed workflow"
             self.__prompt_queue.history[prompt_id] = {
                 "prompt": prompt_stored,
                 "outputs": {},
                 "status": status_dict,
                 "user_id": meta.get("user_id"),
+                "username": username,
+                "workflow_name": workflow_name,
             }
+            # Finalize run log status
+            try:
+                from .workflow_run_log import get_run_log
+
+                completed_flag = None
+                if isinstance(status_dict, dict):
+                    completed_flag = status_dict.get("completed")
+                elif hasattr(status, "completed"):
+                    completed_flag = getattr(status, "completed", None)
+                if completed_flag is False:
+                    final_status = "error"
+                elif completed_flag is True:
+                    final_status = "completed"
+                else:
+                    final_status = "completed"
+                get_run_log().update_status(
+                    str(prompt_id) if prompt_id else None,
+                    final_status,
+                    finished=True,
+                )
+            except Exception as e:
+                print(f"[Usgromana] workflow run log (done) failed: {e}")
+
             if history_result:
                 self.__prompt_queue.history[prompt_id].update(history_result)
                 prompt_user = meta.get("user_id")
@@ -372,6 +507,53 @@ class AccessControl:
                 if not meta or meta.get("user_id") != current_user: continue
                 pending.append(unwrap(item))
             return (running, copy.deepcopy(pending))
+
+    def get_active_runs_snapshot(self) -> list[dict]:
+        """Currently running + pending jobs with username / workflow (all users)."""
+        from .workflow_run_log import WorkflowRunLog
+
+        out: list[dict] = []
+        try:
+            with self.__prompt_queue.mutex:
+                for item in self.__prompt_queue.currently_running.values():
+                    meta, body = _usgromana_meta_from_queue_entry(item)
+                    parsed = WorkflowRunLog.extract_prompt_meta(body)
+                    uname = meta.get("username") or _resolve_username_for_queue(
+                        self.users_db, meta.get("user_id")
+                    )
+                    out.append(
+                        {
+                            "status": "running",
+                            "prompt_id": parsed.get("prompt_id"),
+                            "user_id": meta.get("user_id"),
+                            "username": uname,
+                            "workflow_name": meta.get("workflow_name")
+                            or parsed.get("workflow_name")
+                            or "Unnamed workflow",
+                            "node_count": parsed.get("node_count") or 0,
+                        }
+                    )
+                for item in self.__prompt_queue.queue:
+                    meta, body = _usgromana_meta_from_queue_entry(item)
+                    parsed = WorkflowRunLog.extract_prompt_meta(body)
+                    uname = meta.get("username") or _resolve_username_for_queue(
+                        self.users_db, meta.get("user_id")
+                    )
+                    out.append(
+                        {
+                            "status": "queued",
+                            "prompt_id": parsed.get("prompt_id"),
+                            "user_id": meta.get("user_id"),
+                            "username": uname,
+                            "workflow_name": meta.get("workflow_name")
+                            or parsed.get("workflow_name")
+                            or "Unnamed workflow",
+                            "node_count": parsed.get("node_count") or 0,
+                        }
+                    )
+        except Exception as e:
+            print(f"[Usgromana] get_active_runs_snapshot failed: {e}")
+        return out
 
     def user_queue_wipe_queue(self):
         with self.__prompt_queue.mutex:

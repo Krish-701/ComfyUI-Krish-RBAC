@@ -14,7 +14,7 @@ let groupsConfig = {};
  */
 window.UsgromanaAdminTabs = {
     _tabs: [],
-    _defaultOrder: ["users", "perms", "ui-defaults", "ip", "env", "nsfw"],
+    _defaultOrder: ["users", "perms", "ui-defaults", "ip", "env", "runs", "nsfw"],
     
     /**
      * Register a new tab in the admin panel.
@@ -118,6 +118,9 @@ window.UsgromanaAdminTabs = {
 const IP_API_ENDPOINT = "/usgromana/api/ip-lists";
 const USER_ENV_API_ENDPOINT = "/usgromana/api/user-env";
 const UI_DEFAULTS_API_ENDPOINT = "/usgromana/api/ui-defaults";
+const WORKFLOW_RUNS_API = "/usgromana/api/workflow-runs";
+const WORKFLOW_RUNS_STATS_API = "/usgromana/api/workflow-runs/stats";
+const WORKFLOW_RUNS_ACTIVE_API = "/usgromana/api/workflow-runs/active";
 
 // --- 1. BLOCKING MAP (The Enforcer) ---
 // If a user lacks permission for the Key, these CSS selectors are hidden via !important
@@ -738,7 +741,8 @@ class usgromanaDialog extends ComfyDialog {
             { id: "ui-defaults", label: "Default UI", order: 2 },
             { id: "ip", label: "IP Rules", order: 3 },
             { id: "env", label: "User Env", order: 4 },
-            { id: "nsfw", label: "NSFW Management", order: 5 }
+            { id: "runs", label: "Run Log", order: 5 },
+            { id: "nsfw", label: "NSFW Management", order: 6 }
         ];
         
         // Combine and sort all tabs
@@ -802,6 +806,7 @@ class usgromanaDialog extends ComfyDialog {
         await this.renderIpRules(this.element.querySelector("#usgromana-tab-ip"));
         this.renderUserEnv(this.element.querySelector("#usgromana-tab-env"), usersList);
         await this.renderUiDefaults(this.element.querySelector("#usgromana-tab-ui-defaults"));
+        await this.renderRunLog(this.element.querySelector("#usgromana-tab-runs"), usersList);
         this.renderNsfwManagement(this.element.querySelector("#usgromana-tab-nsfw"));
         
         // Fill Data - Extension tabs
@@ -869,10 +874,34 @@ renderUsers(list, container) {
     const self = this;
 
     let html = `
+        <div class="usgromana-section" style="margin-bottom:18px;">
+            <h3>Bulk Import Users (CSV)</h3>
+            <p>
+                Format: <code>name,email,password,role</code><br>
+                Example: <code>nkrishnan,nkrishnan@pixstone.com,Nkri@Sh12,user</code><br>
+                Users log in with their <strong>email</strong> (username also works). Roles:
+                admin, power, user, guest.
+            </p>
+            <div class="usgromana-row" style="gap:8px; flex-wrap:wrap; align-items:center;">
+                <input type="file" id="usgromana-bulk-file" accept=".csv,text/csv,text/plain" />
+                <button class="usgromana-btn secondary" id="usgromana-bulk-import">Import CSV</button>
+            </div>
+            <div style="margin-top:10px;">
+                <label class="usgromana-field-label">Or paste CSV</label>
+                <textarea id="usgromana-bulk-text" class="usgromana-textarea" rows="5"
+                    placeholder="name,email,password,role&#10;nkrishnan,nkrishnan@pixstone.com,Nkri@Sh12,user"></textarea>
+            </div>
+            <div style="margin-top:8px;">
+                <small id="usgromana-bulk-status" class="usgromana-muted"></small>
+            </div>
+            <pre id="usgromana-bulk-result" style="margin-top:8px;max-height:160px;overflow:auto;font-size:12px;display:none;background:rgba(0,0,0,.25);padding:10px;border-radius:8px;"></pre>
+        </div>
+
         <table class="usgromana-table">
             <thead>
                 <tr>
                     <th>User Account</th>
+                    <th>Email (login)</th>
                     <th>Assigned Group</th>
                     <th style="text-align:center;width:120px;">SFW Check</th>
                     <th style="text-align:right;width:180px;">Actions</th>
@@ -884,6 +913,7 @@ renderUsers(list, container) {
     list.forEach(u => {
         const grp = (u.groups && u.groups.length) ? u.groups[0] : "user";
         const uname = u.username || "unknown";
+        const email = u.email || "";
         const isSelf = currentName && uname === currentName;
         const isGuest = uname.toLowerCase() === "guest";
 
@@ -907,7 +937,8 @@ renderUsers(list, container) {
 
         html += `
             <tr>
-                <td><strong>${uname}</strong></td>
+                <td><strong>${escapeHtml(uname)}</strong></td>
+                <td style="opacity:.9;font-size:12px;">${email ? escapeHtml(email) : "—"}</td>
                 <td>
                     <select
                         class="usgromana-role-select"
@@ -938,6 +969,81 @@ renderUsers(list, container) {
 
     html += `</tbody></table>`;
     container.innerHTML = html;
+
+    // --- Bulk CSV import ---
+    const bulkFile = container.querySelector("#usgromana-bulk-file");
+    const bulkText = container.querySelector("#usgromana-bulk-text");
+    const bulkBtn = container.querySelector("#usgromana-bulk-import");
+    const bulkStatus = container.querySelector("#usgromana-bulk-status");
+    const bulkResult = container.querySelector("#usgromana-bulk-result");
+
+    const runBulkImport = async (csvContent) => {
+        if (!csvContent || !String(csvContent).trim()) {
+            bulkStatus.textContent = "Paste CSV text or choose a .csv file first.";
+            return;
+        }
+        bulkBtn.disabled = true;
+        bulkStatus.textContent = "Importing…";
+        bulkResult.style.display = "none";
+        try {
+            const res = await fetch("/usgromana/api/users/bulk", {
+                method: "POST",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ csv: csvContent }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                bulkStatus.textContent = data.error || `Import failed (${res.status})`;
+                bulkBtn.disabled = false;
+                return;
+            }
+            const summary =
+                `Created ${data.created_count || 0}, skipped ${data.skipped_count || 0}, errors ${data.error_count || 0}.`;
+            bulkStatus.textContent = summary;
+            bulkResult.style.display = "block";
+            bulkResult.textContent = JSON.stringify(
+                {
+                    created: data.created || [],
+                    skipped: data.skipped || [],
+                    errors: data.errors || [],
+                },
+                null,
+                2
+            );
+            // Brief summary before table refresh so the result is not lost silently
+            window.alert(
+                `Bulk import finished.\n${summary}\n\n` +
+                `Created users login with their email address.`
+            );
+            const usersData = await getData("/usgromana/api/users");
+            self.renderUsers(usersData?.users || [], container);
+        } catch (e) {
+            console.error("[usgromana] bulk import failed:", e);
+            bulkStatus.textContent = "Import failed. See console.";
+            bulkBtn.disabled = false;
+        }
+    };
+
+    if (bulkBtn) {
+        bulkBtn.onclick = async () => {
+            // Prefer file if selected
+            if (bulkFile?.files?.length) {
+                const file = bulkFile.files[0];
+                const text = await file.text();
+                await runBulkImport(text);
+                return;
+            }
+            await runBulkImport(bulkText?.value || "");
+        };
+    }
+    if (bulkFile) {
+        bulkFile.onchange = async () => {
+            if (!bulkFile.files?.length) return;
+            const text = await bulkFile.files[0].text();
+            if (bulkText) bulkText.value = text;
+        };
+    }
 
     // --- Save handler per user ---
     container.querySelectorAll(".btn-save").forEach(btn => {
@@ -1492,6 +1598,219 @@ renderUserEnv(container, usersList) {
     if (users.length > 0) {
         refreshStatus();
     }
+}
+
+async renderRunLog(container, usersList) {
+    if (!container) return;
+
+    const userOptions = (usersList || [])
+        .map((u) => {
+            const name = u.username || "";
+            return `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`;
+        })
+        .join("");
+
+    container.innerHTML = `
+        <div class="usgromana-section">
+            <h3>Workflow Run Log</h3>
+            <p>
+                Every queued workflow is recorded with <strong>who ran it</strong>,
+                <strong>when</strong>, and the <strong>workflow name</strong>.
+                Active jobs also appear on the bottom status bar while ComfyUI is open.
+            </p>
+
+            <div class="usgromana-row" style="gap:8px; flex-wrap:wrap; align-items:flex-end;">
+                <div>
+                    <label class="usgromana-field-label">Filter user</label>
+                    <select id="usgromana-runs-user" class="usgromana-select">
+                        <option value="">All users</option>
+                        ${userOptions}
+                    </select>
+                </div>
+                <div style="display:flex; gap:8px; align-items:flex-end;">
+                    <button class="usgromana-btn secondary" id="usgromana-runs-refresh">Refresh</button>
+                    <button class="usgromana-btn danger" id="usgromana-runs-clear">Clear log</button>
+                </div>
+            </div>
+
+            <div id="usgromana-runs-active" style="margin-top:12px;"></div>
+            <div id="usgromana-runs-stats" style="margin-top:12px;"></div>
+
+            <div style="margin-top:14px; overflow:auto; max-height:360px;">
+                <table class="usgromana-table" id="usgromana-runs-table">
+                    <thead>
+                        <tr>
+                            <th>Time (UTC)</th>
+                            <th>User</th>
+                            <th>Workflow</th>
+                            <th>Status</th>
+                            <th>Duration</th>
+                            <th>Nodes</th>
+                        </tr>
+                    </thead>
+                    <tbody id="usgromana-runs-tbody">
+                        <tr><td colspan="6" style="text-align:center;opacity:.7;">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div style="margin-top:6px;">
+                <small id="usgromana-runs-meta" class="usgromana-muted"></small>
+            </div>
+        </div>
+    `;
+
+    const userSelect = container.querySelector("#usgromana-runs-user");
+    const tbody = container.querySelector("#usgromana-runs-tbody");
+    const statsEl = container.querySelector("#usgromana-runs-stats");
+    const activeEl = container.querySelector("#usgromana-runs-active");
+    const metaEl = container.querySelector("#usgromana-runs-meta");
+    const refreshBtn = container.querySelector("#usgromana-runs-refresh");
+    const clearBtn = container.querySelector("#usgromana-runs-clear");
+
+    const fmtDuration = (sec) => {
+        if (sec == null || sec === "") return "—";
+        const n = Number(sec);
+        if (Number.isNaN(n)) return "—";
+        if (n < 60) return `${n.toFixed(1)}s`;
+        const m = Math.floor(n / 60);
+        const s = Math.round(n % 60);
+        return `${m}m ${s}s`;
+    };
+
+    const statusColor = (st) => {
+        const s = (st || "").toLowerCase();
+        if (s === "completed") return "#3dd68c";
+        if (s === "running") return "#6eb6ff";
+        if (s === "queued") return "#e0c35a";
+        if (s === "error" || s === "failed") return "#ff6b6b";
+        return "#ccc";
+    };
+
+    const load = async () => {
+        const filterUser = (userSelect?.value || "").trim();
+        const q = new URLSearchParams();
+        q.set("limit", "200");
+        if (filterUser) q.set("user", filterUser);
+
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;opacity:.7;">Loading…</td></tr>`;
+
+        try {
+            const [runsRes, statsRes, activeRes] = await Promise.all([
+                fetch(`${WORKFLOW_RUNS_API}?${q}`, { credentials: "include" }),
+                fetch(
+                    `${WORKFLOW_RUNS_STATS_API}${filterUser ? `?user=${encodeURIComponent(filterUser)}` : ""}`,
+                    { credentials: "include" }
+                ),
+                fetch(WORKFLOW_RUNS_ACTIVE_API, { credentials: "include" }),
+            ]);
+
+            const runsData = runsRes.ok ? await runsRes.json() : { runs: [], total: 0 };
+            const statsData = statsRes.ok ? await statsRes.json() : { users: [], total_runs: 0 };
+            const activeData = activeRes.ok ? await activeRes.json() : { active: [] };
+
+            // Active banner
+            const active = activeData.active || [];
+            if (active.length) {
+                activeEl.innerHTML = `
+                    <div style="padding:10px 12px;border-radius:8px;background:rgba(60,120,255,0.12);border:1px solid rgba(100,160,255,0.35);">
+                        <strong>Active now (${active.length})</strong>
+                        <ul style="margin:6px 0 0 18px;padding:0;">
+                            ${active
+                                .map(
+                                    (r) =>
+                                        `<li><b>${escapeHtml(r.username || "?")}</b> — ${escapeHtml(
+                                            r.workflow_name || "Unnamed"
+                                        )} <span style="opacity:.7">(${escapeHtml(r.status || "")})</span></li>`
+                                )
+                                .join("")}
+                        </ul>
+                    </div>`;
+            } else {
+                activeEl.innerHTML = `<div style="opacity:.7;font-size:13px;">No jobs currently running or queued.</div>`;
+            }
+
+            // Stats cards
+            const users = statsData.users || [];
+            if (users.length) {
+                statsEl.innerHTML = `
+                    <div style="display:flex;flex-wrap:wrap;gap:8px;">
+                        <div style="padding:10px 12px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);min-width:120px;">
+                            <div style="font-size:11px;opacity:.7;">Total runs</div>
+                            <div style="font-size:20px;font-weight:600;">${statsData.total_runs || 0}</div>
+                        </div>
+                        ${users
+                            .slice(0, 8)
+                            .map(
+                                (u) => `
+                            <div style="padding:10px 12px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);min-width:140px;">
+                                <div style="font-size:11px;opacity:.7;">${escapeHtml(u.username || "?")}</div>
+                                <div style="font-size:18px;font-weight:600;">${u.total_runs || 0} runs</div>
+                                <div style="font-size:11px;opacity:.65;margin-top:2px;">Last: ${escapeHtml(
+                                    u.last_run_at || "—"
+                                )}</div>
+                            </div>`
+                            )
+                            .join("")}
+                    </div>`;
+            } else {
+                statsEl.innerHTML = `<div style="opacity:.7;font-size:13px;">No run statistics yet. Queue a workflow to start logging.</div>`;
+            }
+
+            // History rows
+            const runs = runsData.runs || [];
+            if (!runs.length) {
+                tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;opacity:.7;">No runs recorded yet.</td></tr>`;
+            } else {
+                tbody.innerHTML = runs
+                    .map((r) => {
+                        const st = r.status || "—";
+                        return `<tr>
+                            <td style="white-space:nowrap;">${escapeHtml(r.started_at || "—")}</td>
+                            <td><strong>${escapeHtml(r.username || "?")}</strong></td>
+                            <td>${escapeHtml(r.workflow_name || "Unnamed workflow")}</td>
+                            <td style="color:${statusColor(st)};font-weight:600;">${escapeHtml(st)}</td>
+                            <td>${fmtDuration(r.duration_sec)}</td>
+                            <td>${r.node_count != null ? r.node_count : "—"}</td>
+                        </tr>`;
+                    })
+                    .join("");
+            }
+
+            metaEl.textContent = `Showing ${runs.length} of ${runsData.total || runs.length} run(s).`;
+        } catch (e) {
+            console.error("[Usgromana] run log load failed:", e);
+            tbody.innerHTML = `<tr><td colspan="6" style="color:#ff6b6b;text-align:center;">Failed to load run log. See console.</td></tr>`;
+            metaEl.textContent = "";
+        }
+    };
+
+    refreshBtn.onclick = () => load();
+    userSelect.onchange = () => load();
+    clearBtn.onclick = async () => {
+        const filterUser = (userSelect?.value || "").trim();
+        const msg = filterUser
+            ? `Clear run history for user "${filterUser}"?`
+            : "Clear ALL workflow run history?";
+        if (!confirm(msg)) return;
+        try {
+            const q = filterUser ? `?user=${encodeURIComponent(filterUser)}` : "";
+            const res = await fetch(`${WORKFLOW_RUNS_API}${q}`, {
+                method: "DELETE",
+                credentials: "include",
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                alert(data.error || `Clear failed (${res.status})`);
+                return;
+            }
+            await load();
+        } catch (e) {
+            console.error("[Usgromana] clear run log failed:", e);
+            alert("Failed to clear run log.");
+        }
+    };
+
+    await load();
 }
 
 renderNsfwManagement(container) {
