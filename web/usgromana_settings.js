@@ -947,6 +947,14 @@ renderUsers(list, container) {
             </button>
         `;
 
+        if (!isGuest) {
+            actionsHtml += `
+                <button class="usgromana-btn secondary btn-reset-pw" data-user="${uname}" title="Set a new password">
+                    Reset PW
+                </button>
+            `;
+        }
+
         // Don't allow deleting yourself or the guest account
         if (!isSelf && !isGuest) {
             actionsHtml += `
@@ -981,7 +989,7 @@ renderUsers(list, container) {
                         ${sfwEnabled ? "checked" : ""}
                     />
                 </td>
-                <td style="text-align:right">
+                <td style="text-align:right; display:flex; flex-wrap:wrap; gap:6px; justify-content:flex-end;">
                     ${actionsHtml}
                 </td>
             </tr>
@@ -1090,6 +1098,58 @@ renderUsers(list, container) {
                 btn.innerText = "Error";
             }
             setTimeout(() => (btn.innerText = "Save Changes"), 1000);
+        };
+    });
+
+    // --- Reset password ---
+    container.querySelectorAll(".btn-reset-pw").forEach(btn => {
+        btn.onclick = async () => {
+            const u = btn.dataset.user;
+            const pw = window.prompt(
+                `Reset password for "${u}"\n\nEnter a new password (any length / characters):`
+            );
+            if (pw === null) return;
+            // No restrictions — use exactly what the admin typed (do not strip)
+            const password = String(pw);
+            const confirmPw = window.prompt(`Confirm new password for "${u}":`);
+            if (confirmPw === null) return;
+            if (String(confirmPw) !== password) {
+                window.alert("Passwords do not match.");
+                return;
+            }
+
+            btn.disabled = true;
+            const originalText = btn.innerText;
+            btn.innerText = "Saving…";
+            try {
+                const res = await fetch(
+                    `/usgromana/api/users/${encodeURIComponent(u)}/password`,
+                    {
+                        method: "PUT",
+                        credentials: "include",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ password }),
+                    }
+                );
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    window.alert(data.error || `Failed (${res.status})`);
+                    btn.disabled = false;
+                    btn.innerText = originalText;
+                    return;
+                }
+                window.alert(data.message || `Password updated for ${u}.`);
+                btn.innerText = "Done";
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.innerText = originalText;
+                }, 1200);
+            } catch (e) {
+                console.error("[usgromana] password reset failed:", e);
+                window.alert("Unexpected error while resetting password.");
+                btn.disabled = false;
+                btn.innerText = originalText;
+            }
         };
     });
 

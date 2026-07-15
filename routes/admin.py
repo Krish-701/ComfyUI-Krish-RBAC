@@ -250,6 +250,56 @@ async def api_update_user_route(request):
         return web.json_response({"status": "ok"})
     return web.Response(status=404)
 
+
+@routes.put("/usgromana/api/users/{target_user}/password")
+async def api_reset_user_password(request):
+    """
+    Admin-only: set / reset a user's password.
+    Body: { "password": "NewPass123!" }
+    """
+    if not is_admin(request):
+        return web.json_response({"error": "Admin only"}, status=403)
+
+    target = request.match_info["target_user"]
+    if not target or target.lower() == "guest":
+        return web.json_response(
+            {"error": "Cannot reset password for guest"}, status=400
+        )
+
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    # Admin reset: no length / complexity rules — any password string is allowed.
+    if "password" not in data and "new_password" not in data:
+        return web.json_response({"error": "Missing 'password' field"}, status=400)
+    new_password = data.get("password")
+    if new_password is None:
+        new_password = data.get("new_password")
+    if not isinstance(new_password, str):
+        new_password = str(new_password)
+
+    uid, rec = users_db.get_user(username=target)
+    if not uid or not rec:
+        return web.json_response({"error": "User not found"}, status=404)
+
+    ok = users_db.set_password(target, new_password)
+    if not ok:
+        return web.json_response({"error": "Failed to update password"}, status=500)
+
+    logger.info(
+        f"[Audit] password reset: target={target} by {_admin_username(request)}"
+    )
+    return web.json_response(
+        {
+            "status": "ok",
+            "message": f"Password updated for {rec.get('username') or target}",
+            "username": rec.get("username") or target,
+        }
+    )
+
+
 @routes.delete("/usgromana/api/users/{target_user}")
 async def api_delete_user_route(request):
     if not is_admin(request): return web.json_response({"error": "Admin only"}, status=403)
