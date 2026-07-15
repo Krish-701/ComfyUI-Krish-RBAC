@@ -67,19 +67,34 @@ async def api_generated_jobs(request: web.Request) -> web.Response:
     """
     Disk-backed output images as /api/jobs-shaped rows for the Assets Generated tab.
     (ComfyUI's UI loads Generated from job history, not /api/assets.)
+
+    Admin/power: all users' outputs. Regular users: only their own.
     """
     if get_assets_imports_visibility() == ASSETS_VISIBILITY_DISABLE_ALL:
         return web.json_response({"jobs": [], "total": 0})
 
     install_comfy_user_bridge()
     user_id = get_comfy_user_id_for_request(request)
+    from ..globals import access_control
+
+    can_view_all = access_control.user_can_view_all(user_id)
+    # None owner_id + allow_all listing path for privileged viewers
+    list_owner = None if can_view_all else user_id
     jobs = []
-    for item in _list_generated_asset_items(user_id, limit=500):
+    for item in _list_generated_asset_items(
+        list_owner, limit=500, force_all_owners=can_view_all
+    ):
         job = _asset_summary_to_completed_job(item)
         if job:
             jobs.append(job)
     jobs.sort(key=lambda j: int(j.get("create_time") or 0), reverse=True)
-    return web.json_response({"jobs": jobs, "total": len(jobs)})
+    return web.json_response(
+        {
+            "jobs": jobs,
+            "total": len(jobs),
+            "can_view_all_runs": can_view_all,
+        }
+    )
 
 
 @routes.get("/usgromana/api/me")

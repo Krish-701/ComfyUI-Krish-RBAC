@@ -12,13 +12,14 @@ import json
 import logging
 import os
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Callable, Iterator
 
 import folder_paths
 from aiohttp import web
 
 from ..constants import SEPARATE_USERS
+from .access_control import use_global_media_root
 from .media_paths import (
     gallery_scan_folder_paths,
     global_input_directory,
@@ -1254,25 +1255,32 @@ def _patch_asset_listing() -> None:
         ]
         wants_output = "output" in tag_list
 
-        if mode == ASSETS_VISIBILITY_ALLOW_ALL:
+        # Admin / power always see every user's assets (like allow_all for them)
+        privileged_viewer = bool(
+            owner_id and access_control.user_can_view_all(owner_id)
+        )
+        effective_allow_all = mode == ASSETS_VISIBILITY_ALLOW_ALL or privileged_viewer
+
+        if effective_allow_all:
             if wants_output:
                 _sync_allow_all_output(force=True, user_id=owner_id)
             else:
                 _sync_global_assets_if_needed()
         else:
             _sync_output_index_if_needed(owner_id, force=wants_output)
-        if mode == ASSETS_VISIBILITY_USER_SPECIFIC and owner_id:
+        if mode == ASSETS_VISIBILITY_USER_SPECIFIC and owner_id and not privileged_viewer:
             _sync_user_input_assets(owner_id)
 
         query_owner = _list_owner_for_query(mode, owner_id)
 
-        if mode == ASSETS_VISIBILITY_ALLOW_ALL:
+        if effective_allow_all:
             result = _list_with_all_owners(**kwargs)
             filtered = _apply_nsfw_to_list_result(result, context="allow_all")
             if wants_output:
                 print(
                     f"[Usgromana::Assets] Generated list: sql_total={result.total} "
                     f"returned={len(filtered.items)} (excludes _thumbs)"
+                    f"{' [admin/power all-users]' if privileged_viewer else ''}"
                 )
                 if result.total and not filtered.items:
                     print(
@@ -1316,7 +1324,8 @@ def _patch_asset_listing() -> None:
         mode = _visibility_mode()
         if mode == ASSETS_VISIBILITY_DISABLE_ALL:
             return None
-        if mode == ASSETS_VISIBILITY_ALLOW_ALL:
+        privileged = bool(owner_id and access_control.user_can_view_all(owner_id))
+        if mode == ASSETS_VISIBILITY_ALLOW_ALL or privileged:
             with _all_owners_visible():
                 detail = original_detail(reference_id=reference_id, owner_id="")
                 if asset_detail_is_nsfw_blocked(detail):
@@ -1340,7 +1349,8 @@ def _patch_asset_listing() -> None:
         mode = _visibility_mode()
         if mode == ASSETS_VISIBILITY_DISABLE_ALL:
             raise ValueError("Asset not found")
-        if mode == ASSETS_VISIBILITY_ALLOW_ALL:
+        privileged = bool(owner_id and access_control.user_can_view_all(owner_id))
+        if mode == ASSETS_VISIBILITY_ALLOW_ALL or privileged:
             with _all_owners_visible():
                 result = original_resolve(reference_id=reference_id, owner_id="")
                 if asset_download_is_nsfw_blocked(result):
@@ -1572,7 +1582,12 @@ def _asset_summary_to_completed_job(item) -> dict | None:
     }
 
 
-def _list_generated_asset_items(owner_id: str | None, *, limit: int = 500) -> list:
+def _list_generated_asset_items(
+    owner_id: str | None,
+    *,
+    limit: int = 500,
+    force_all_owners: bool = False,
+) -> list:
     """Output-tagged asset rows from the DB (same source as /api/assets Generated)."""
     try:
         from app.assets.services import asset_management as am
@@ -1595,7 +1610,10 @@ def _list_generated_asset_items(owner_id: str | None, *, limit: int = 500) -> li
         "order": "desc",
     }
 
-    if mode == ASSETS_VISIBILITY_ALLOW_ALL:
+    # Privileged (admin/power) or global allow_all: every owner's outputs
+    if force_all_owners or mode == ASSETS_VISIBILITY_ALLOW_ALL:
+        if force_all_owners:
+            _sync_allow_all_output(force=False, user_id=owner_id)
         with _all_owners_visible():
             result = am.list_assets_page(owner_id="", **kwargs)
     else:
@@ -1622,6 +1640,7 @@ def _merge_disk_outputs_into_jobs_payload(
     owner_id: str | None,
     offset: int,
     limit: int | None,
+    force_all_owners: bool = False,
 ) -> dict:
     """
     Comfy's Generated tab lists /api/jobs (history), not /api/assets.
@@ -1643,7 +1662,9 @@ def _merge_disk_outputs_into_jobs_payload(
             existing_keys.add(key)
 
     synthetic: list[dict] = []
-    for item in _list_generated_asset_items(owner_id, limit=500):
+    for item in _list_generated_asset_items(
+        owner_id, limit=500, force_all_owners=force_all_owners
+    ):
         job = _asset_summary_to_completed_job(item)
         if not job:
             continue
@@ -1715,6 +1736,22 @@ def create_comfy_user_middleware():
                 pass
 
         path = request.path or ""
+        can_view_all = bool(user_id and access_control.user_can_view_all(user_id))
+
+        # Admin/power: resolve /view and related media from the global tree so
+        # history previews with subfolder=<other_user_id>/... work.
+        media_paths = (
+            path == "/view"
+            or path.startswith("/view?")
+            or path.rstrip("/") in ("/history", "/api/history", "/queue", "/api/queue")
+            or path.rstrip("/").startswith("/api/view")
+        )
+        global_media_cm = (
+            use_global_media_root(True)
+            if (can_view_all and media_paths)
+            else nullcontext()
+        )
+
         if request.method == "GET" and path.rstrip("/") == "/api/assets":
             try:
                 from app.assets.services import asset_management as am
@@ -1739,7 +1776,7 @@ def create_comfy_user_middleware():
             if not _thumb_purge_done:
                 _thumb_purge_done = True
                 _purge_thumb_asset_references()
-            if assets_mode == ASSETS_VISIBILITY_ALLOW_ALL:
+            if assets_mode == ASSETS_VISIBILITY_ALLOW_ALL or can_view_all:
                 _sync_allow_all_output(force=True, user_id=user_id)
             elif user_id:
                 _repair_output_asset_registry(user_id=user_id)
@@ -1765,7 +1802,13 @@ def create_comfy_user_middleware():
                     {"ok": True, "images": [], "folders": []},
                     status=200,
                 )
-            with gallery_scan_folder_paths(mode, user_id):
+            # Privileged: scan full output tree
+            gallery_mode = (
+                ASSETS_VISIBILITY_ALLOW_ALL
+                if can_view_all
+                else mode
+            )
+            with gallery_scan_folder_paths(gallery_mode, user_id):
                 return await handler(request)
 
         if (
@@ -1775,12 +1818,13 @@ def create_comfy_user_middleware():
         ):
             status_param = (request.rel_url.query.get("status") or "").lower()
             if "completed" in status_param:
-                if assets_mode == ASSETS_VISIBILITY_ALLOW_ALL:
+                if assets_mode == ASSETS_VISIBILITY_ALLOW_ALL or can_view_all:
                     _sync_allow_all_output(force=False, user_id=user_id)
                 elif user_id:
                     _sync_output_index_if_needed(user_id, force=False)
 
-        response = await handler(request)
+        with global_media_cm:
+            response = await handler(request)
 
         if (
             request.method == "GET"
@@ -1807,9 +1851,10 @@ def create_comfy_user_middleware():
                     payload = json.loads(body)
                     merged = _merge_disk_outputs_into_jobs_payload(
                         payload,
-                        owner_id=user_id,
+                        owner_id=None if can_view_all else user_id,
                         offset=max(0, offset),
                         limit=limit,
+                        force_all_owners=can_view_all,
                     )
                     return web.json_response(merged, status=200)
 

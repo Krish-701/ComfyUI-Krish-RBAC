@@ -52,6 +52,22 @@ def resolve_output_file_path(
         if sub and not sub.split("/")[0] == uid:
             candidates.append(os.path.join(base, uid, sub, name))
 
+    # Privileged viewers: also search every first-level user folder under output/
+    if access_control.current_user_can_view_all():
+        try:
+            for entry in os.listdir(base):
+                user_root = os.path.join(base, entry)
+                if not os.path.isdir(user_root):
+                    continue
+                if sub:
+                    candidates.append(os.path.join(user_root, sub, name))
+                candidates.append(os.path.join(user_root, name))
+                # When subfolder already starts with a user id, avoid double-nest
+                if sub and sub.split("/")[0] == entry:
+                    candidates.append(os.path.join(base, sub, name))
+        except OSError:
+            pass
+
     seen: set[str] = set()
     for path in candidates:
         norm = os.path.normpath(path)

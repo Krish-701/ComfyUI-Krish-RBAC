@@ -33,6 +33,31 @@ EXTENSION_BLOCK_MAP = {
 }
 
 
+# When True, folder_paths input/output/temp use the global Comfy roots so
+# admin/power can open other users' files via subfolder=<user_id>/...
+_global_media_root = contextvars.ContextVar("usgromana_global_media_root", default=False)
+
+
+def use_global_media_root(enabled: bool = True):
+    """Context manager: serve media from global output/input/temp trees."""
+    return _GlobalMediaRoot(enabled)
+
+
+class _GlobalMediaRoot:
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled
+        self._token = None
+
+    def __enter__(self):
+        self._token = _global_media_root.set(bool(self.enabled))
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._token is not None:
+            _global_media_root.reset(self._token)
+        return False
+
+
 def _usgromana_meta_from_queue_entry(entry):
     """Split Usgromana ``{user_id}`` tail from a queue heap entry."""
     if isinstance(entry, tuple) and entry and isinstance(entry[-1], dict):
@@ -211,6 +236,30 @@ class AccessControl:
     def get_current_user_id(self):
         return self._current_user.get() or self.__current_user_id
 
+    def user_can_view_all(self, user_key: str | None = None) -> bool:
+        """
+        True for admin / power accounts.
+        They may see every user's queue, history, and outputs.
+        """
+        key = user_key if user_key is not None else self.get_current_user_id()
+        if not key:
+            return False
+        try:
+            uid, rec = self.users_db.get_user(user_id=key)
+            if not rec:
+                uid, rec = self.users_db.get_user(username=key)
+            if not rec:
+                return False
+            if rec.get("admin"):
+                return True
+            groups = [str(g).lower() for g in (rec.get("groups") or [])]
+            return "admin" in groups or "power" in groups
+        except Exception:
+            return False
+
+    def current_user_can_view_all(self) -> bool:
+        return self.user_can_view_all(self.get_current_user_id())
+
     def _resolved_directory_user_id(self) -> str | None:
         """User id for per-user folder roots, or None when no request context (e.g. startup asset scan)."""
         uid = self.get_current_user_id()
@@ -218,6 +267,9 @@ class AccessControl:
 
     def get_user_output_directory(self):
         base = self.__get_output_directory()
+        # Admin/power HTTP media reads use the global tree (subfolder holds user_id).
+        if _global_media_root.get():
+            return base
         uid = self._resolved_directory_user_id()
         if not uid:
             return base
@@ -227,6 +279,8 @@ class AccessControl:
 
     def get_user_temp_directory(self):
         base = self.__get_temp_directory()
+        if _global_media_root.get():
+            return base
         uid = self._resolved_directory_user_id()
         if not uid:
             return base
@@ -236,6 +290,8 @@ class AccessControl:
 
     def get_user_input_directory(self):
         base = self.__get_input_directory()
+        if _global_media_root.get():
+            return base
         uid = self._resolved_directory_user_id()
         if not uid:
             return base
@@ -489,22 +545,67 @@ class AccessControl:
                         print(f"[Usgromana] post-prompt hooks: {e}")
             self.server.queue_updated()
 
+    def _history_entry_for_viewer(self, entry: dict, *, can_view_all: bool) -> dict:
+        """
+        Deep-copy a history row for the API. For privileged viewers, rewrite
+        image/media subfolders to ``<owner_user_id>/...`` so previews resolve
+        under the global output root.
+        """
+        out = copy.deepcopy(entry)
+        if "prompt" in out:
+            out["prompt"] = sanitize_prompt_tuple_for_api(out["prompt"])
+        if not can_view_all:
+            return out
+
+        owner = out.get("user_id")
+        if not owner:
+            return out
+
+        outputs = out.get("outputs")
+        if not isinstance(outputs, dict):
+            return out
+
+        media_keys = ("images", "gifs", "videos", "audio", "files")
+        for node_out in outputs.values():
+            if not isinstance(node_out, dict):
+                continue
+            for key in media_keys:
+                items = node_out.get(key)
+                if not isinstance(items, list):
+                    continue
+                for media in items:
+                    if not isinstance(media, dict):
+                        continue
+                    mtype = media.get("type") or "output"
+                    if mtype not in ("output", "temp", "input"):
+                        continue
+                    sub = (media.get("subfolder") or "").replace("\\", "/").strip("/")
+                    if sub == owner or sub.startswith(f"{owner}/"):
+                        continue
+                    media["subfolder"] = f"{owner}/{sub}".strip("/") if sub else str(owner)
+        return out
+
     def user_queue_get_current_queue(self):
         def unwrap(entry):
             _, body = _usgromana_meta_from_queue_entry(entry)
             return sanitize_prompt_tuple_for_api(body)
 
         current_user = self.get_current_user_id()
+        can_view_all = self.current_user_can_view_all()
         with self.__prompt_queue.mutex:
             running = []
             pending = []
             for item in self.__prompt_queue.currently_running.values():
                 meta = item[-1] if isinstance(item[-1], dict) else None
-                if not meta or meta.get("user_id") != current_user: continue
+                if not can_view_all:
+                    if not meta or meta.get("user_id") != current_user:
+                        continue
                 running.append(unwrap(item))
             for item in self.__prompt_queue.queue:
                 meta = item[-1] if isinstance(item[-1], dict) else None
-                if not meta or meta.get("user_id") != current_user: continue
+                if not can_view_all:
+                    if not meta or meta.get("user_id") != current_user:
+                        continue
                 pending.append(unwrap(item))
             return (running, copy.deepcopy(pending))
 
@@ -558,10 +659,18 @@ class AccessControl:
     def user_queue_wipe_queue(self):
         with self.__prompt_queue.mutex:
             current_user = self.get_current_user_id()
-            self.__prompt_queue.queue = [
-                i for i in self.__prompt_queue.queue
-                if not (isinstance(i[-1], dict) and i[-1].get("user_id") == current_user)
-            ]
+            can_view_all = self.current_user_can_view_all()
+            if can_view_all:
+                # Admin/power: clear the entire pending queue
+                self.__prompt_queue.queue = []
+            else:
+                self.__prompt_queue.queue = [
+                    i
+                    for i in self.__prompt_queue.queue
+                    if not (
+                        isinstance(i[-1], dict) and i[-1].get("user_id") == current_user
+                    )
+                ]
             self.server.queue_updated()
 
     def user_queue_delete_queue_item(self, func):
@@ -569,10 +678,16 @@ class AccessControl:
             _, body = _usgromana_meta_from_queue_entry(entry)
             return sanitize_prompt_tuple_for_api(body)
 
+        current_user = self.get_current_user_id()
+        can_view_all = self.current_user_can_view_all()
         with self.__prompt_queue.mutex:
             for i, item in enumerate(self.__prompt_queue.queue):
                 meta = item[-1] if isinstance(item[-1], dict) else None
-                if meta and meta.get("user_id") == self.get_current_user_id() and func(unwrap(item)):
+                if not meta:
+                    continue
+                if not can_view_all and meta.get("user_id") != current_user:
+                    continue
+                if func(unwrap(item)):
                     self.__prompt_queue.queue.pop(i)
                     heapq.heapify(self.__prompt_queue.queue)
                     self.server.queue_updated()
@@ -582,26 +697,31 @@ class AccessControl:
     def user_queue_get_history(self, prompt_id=None, max_items=None, offset=-1):
         with self.__prompt_queue.mutex:
             user = self.get_current_user_id()
-            filtered = {
-                k: v for k, v in self.__prompt_queue.history.items()
-                if v.get("user_id") == user
-            }
+            can_view_all = self.current_user_can_view_all()
+            if can_view_all:
+                filtered = dict(self.__prompt_queue.history)
+            else:
+                filtered = {
+                    k: v
+                    for k, v in self.__prompt_queue.history.items()
+                    if v.get("user_id") == user
+                }
             if prompt_id:
                 if prompt_id not in filtered:
                     return {}
-                entry = dict(filtered[prompt_id])
-                if "prompt" in entry:
-                    entry["prompt"] = sanitize_prompt_tuple_for_api(entry["prompt"])
-                return {prompt_id: entry}
+                return {
+                    prompt_id: self._history_entry_for_viewer(
+                        filtered[prompt_id], can_view_all=can_view_all
+                    )
+                }
             keys = list(filtered.keys())
             if offset < 0:
                 offset = max(0, len(keys) - max_items) if max_items else 0
             result = {}
             for k in keys[offset:]:
-                entry = dict(filtered[k])
-                if "prompt" in entry:
-                    entry["prompt"] = sanitize_prompt_tuple_for_api(entry["prompt"])
-                result[k] = entry
+                result[k] = self._history_entry_for_viewer(
+                    filtered[k], can_view_all=can_view_all
+                )
                 if max_items and len(result) >= max_items:
                     break
             return result
@@ -609,7 +729,11 @@ class AccessControl:
     def user_queue_wipe_history(self):
         with self.__prompt_queue.mutex:
             u = self.get_current_user_id()
-            self.__prompt_queue.history = {
-                k: v for k, v in self.__prompt_queue.history.items()
-                if v.get("user_id") != u
-            }
+            if self.current_user_can_view_all():
+                self.__prompt_queue.history = {}
+            else:
+                self.__prompt_queue.history = {
+                    k: v
+                    for k, v in self.__prompt_queue.history.items()
+                    if v.get("user_id") != u
+                }
