@@ -62,3 +62,29 @@ def test_extract_workflow_name():
         == "from-png"
     )
     assert WorkflowRunLog.extract_workflow_name({}, {"1": {}, "2": {}}) == "Prompt (2 nodes)"
+
+
+def test_search_by_job_id_and_name(run_log):
+    run_log.log_queued(
+        prompt_id="job-abc-12345",
+        user_id="u1",
+        username="alice",
+        workflow_name="portrait.json",
+    )
+    run_log.log_queued(
+        prompt_id="other-id",
+        user_id="u2",
+        username="bob",
+        workflow_name="upscale.json",
+    )
+    by_job = run_log.list_runs(search="abc-123")
+    assert by_job["total"] == 1
+    assert by_job["runs"][0]["job_id"] == "job-abc-12345"
+    assert by_job["runs"][0]["username"] == "alice"
+
+    by_name = run_log.list_runs(search="bob")
+    assert by_name["total"] == 1
+    assert by_name["runs"][0]["workflow_name"] == "upscale.json"
+
+    by_wf = run_log.list_runs(search="portrait")
+    assert by_wf["total"] == 1

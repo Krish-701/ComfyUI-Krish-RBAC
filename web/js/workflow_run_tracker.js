@@ -124,14 +124,19 @@ function renderActiveBar(payload) {
         const who = r.username || "unknown";
         const wf = r.workflow_name || "Unnamed";
         const st = r.status === "running" ? "▶" : "…";
-        return `${st} ${who}: ${wf}`;
+        const jid = r.job_id || r.prompt_id || "";
+        const jshort =
+            jid && String(jid).length > 12
+                ? String(jid).slice(0, 6) + "…"
+                : jid;
+        return jshort ? `${st} ${who}: ${wf} [${jshort}]` : `${st} ${who}: ${wf}`;
     });
     const more = active.length > 4 ? ` (+${active.length - 4} more)` : "";
     bar.textContent = `Runs · ${bits.join("  |  ")}${more}`;
     bar.title = active
         .map(
             (r) =>
-                `${r.status || "?"} | ${r.username || "?"} | ${r.workflow_name || "?"} | ${r.prompt_id || ""}`
+                `${r.status || "?"} | ${r.username || "?"} | ${r.workflow_name || "?"} | job:${r.job_id || r.prompt_id || ""}`
         )
         .join("\n");
     bar.style.display = "block";

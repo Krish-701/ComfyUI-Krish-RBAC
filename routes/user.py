@@ -119,6 +119,9 @@ async def api_me(request: web.Request) -> web.Response:
             role = candidate
             break
 
+    # Admin + power may view every user's run log / active jobs
+    can_view_all_runs = bool(is_admin or role in ("admin", "power"))
+
     return web.json_response(
         {
             "username": username,
@@ -126,6 +129,7 @@ async def api_me(request: web.Request) -> web.Response:
             "role": role,
             "groups": groups,
             "is_admin": is_admin,
+            "can_view_all_runs": can_view_all_runs,
             "assets_imports_visibility": get_assets_imports_visibility(),
         }
     )

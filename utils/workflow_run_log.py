@@ -224,6 +224,7 @@ class WorkflowRunLog:
         limit: int = 100,
         offset: int = 0,
         status: str | None = None,
+        search: str | None = None,
     ) -> dict[str, Any]:
         limit = max(1, min(int(limit or 100), 1000))
         offset = max(0, int(offset or 0))
@@ -239,10 +240,42 @@ class WorkflowRunLog:
             runs = [r for r in runs if r.get("user_id") == user_id]
         if status:
             runs = [r for r in runs if r.get("status") == status]
+        if search and str(search).strip():
+            needle = str(search).strip().lower()
+
+            def _match(run: dict) -> bool:
+                fields = (
+                    run.get("prompt_id"),
+                    run.get("id"),
+                    run.get("username"),
+                    run.get("user_id"),
+                    run.get("workflow_name"),
+                    run.get("status"),
+                    run.get("started_at"),
+                    run.get("finished_at"),
+                    # Comfy-style aliases people may paste
+                    f"job:{run.get('prompt_id')}" if run.get("prompt_id") else "",
+                    f"job_id:{run.get('prompt_id')}" if run.get("prompt_id") else "",
+                )
+                hay = " ".join(str(x) for x in fields if x is not None).lower()
+                return needle in hay
+
+            runs = [r for r in runs if _match(r)]
+
+        # Normalize job_id alias for API consumers (same as prompt_id)
+        for r in runs:
+            if "job_id" not in r:
+                r["job_id"] = r.get("prompt_id")
 
         total = len(runs)
         page = runs[offset : offset + limit]
-        return {"runs": page, "total": total, "limit": limit, "offset": offset}
+        return {
+            "runs": page,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "search": (str(search).strip() if search else None),
+        }
 
     def stats(
         self,

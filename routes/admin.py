@@ -423,19 +423,31 @@ async def api_nsfw_management(request):
 # ---------------------------------------------------------------------------
 
 def _caller_identity(request):
-    """Return (username, user_id, is_admin) for the JWT caller."""
+    """
+    Return (username, user_id, is_admin, role, can_view_all_runs).
+
+    can_view_all_runs: admin + power can see every user's activity.
+    Regular user/guest only see their own runs.
+    """
     token = jwt_auth.get_token_from_request(request)
     if not token:
-        return None, None, False
+        return None, None, False, "guest", False
     try:
         p = jwt_auth.decode_access_token(token)
         username = p.get("username")
         user_id = p.get("id")
         _, u = users_db.get_user(username=username) if username else (None, {})
-        admin = bool(u and (u.get("admin") or "admin" in [g.lower() for g in u.get("groups", [])]))
-        return username, user_id, admin
+        groups = [g.lower() for g in (u.get("groups") or [])] if u else []
+        admin = bool(u and (u.get("admin") or "admin" in groups))
+        role = "guest"
+        for candidate in ("admin", "power", "user", "guest"):
+            if candidate in groups or (candidate == "admin" and admin):
+                role = candidate
+                break
+        can_view_all = admin or role in ("admin", "power")
+        return username, user_id, admin, role, can_view_all
     except Exception:
-        return None, None, False
+        return None, None, False, "guest", False
 
 
 @routes.get("/usgromana/api/workflow-runs")
@@ -443,11 +455,11 @@ async def api_workflow_runs(request):
     """
     List workflow execution history.
 
-    - Admins: all users (optional ?user= filter)
-    - Non-admins: only their own runs
-    Query: limit, offset, user, status
+    - Admin / power: all users (optional ?user= filter)
+    - user / guest: only their own runs
+    Query: limit, offset, user, status, q (search job id / name / workflow / status)
     """
-    username, user_id, admin = _caller_identity(request)
+    username, user_id, admin, role, can_view_all = _caller_identity(request)
     if not username:
         return web.json_response({"error": "Authentication required"}, status=401)
 
@@ -458,9 +470,11 @@ async def api_workflow_runs(request):
         limit = int(q.get("limit", "100"))
         offset = int(q.get("offset", "0"))
         status = q.get("status") or None
+        search = (q.get("q") or q.get("search") or "").strip() or None
         filter_user = (q.get("user") or "").strip() or None
 
-        if not admin:
+        if not can_view_all:
+            # Hard isolation: non-privileged users never query other accounts
             filter_user = username
 
         result = get_run_log().list_runs(
@@ -468,9 +482,12 @@ async def api_workflow_runs(request):
             limit=limit,
             offset=offset,
             status=status,
+            search=search,
         )
         result["viewer"] = username
+        result["role"] = role
         result["is_admin"] = admin
+        result["can_view_all_runs"] = can_view_all
         return web.json_response(result)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -480,24 +497,26 @@ async def api_workflow_runs(request):
 async def api_workflow_runs_stats(request):
     """
     Aggregated stats: how many workflows each user ran, top workflows, last run time.
-    Admins see everyone; users see only themselves.
+    Admin/power see everyone; regular users see only themselves.
     """
-    username, user_id, admin = _caller_identity(request)
+    username, user_id, admin, role, can_view_all = _caller_identity(request)
     if not username:
         return web.json_response({"error": "Authentication required"}, status=401)
 
     try:
         from ..utils.workflow_run_log import get_run_log
 
-        filter_user = None if admin else username
-        # Admin may filter to one user via ?user=
+        filter_user = None if can_view_all else username
+        # Privileged roles may filter to one user via ?user=
         q_user = (request.rel_url.query.get("user") or "").strip()
-        if admin and q_user:
+        if can_view_all and q_user:
             filter_user = q_user
 
         stats = get_run_log().stats(username=filter_user)
         stats["viewer"] = username
+        stats["role"] = role
         stats["is_admin"] = admin
+        stats["can_view_all_runs"] = can_view_all
         return web.json_response(stats)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -506,10 +525,10 @@ async def api_workflow_runs_stats(request):
 @routes.get("/usgromana/api/workflow-runs/active")
 async def api_workflow_runs_active(request):
     """
-    Currently queued/running prompts with runner username + workflow name.
-    Admins see all; users see only their own.
+    Currently queued/running prompts with runner username, workflow, job id.
+    Admin/power see all; regular users see only their own.
     """
-    username, user_id, admin = _caller_identity(request)
+    username, user_id, admin, role, can_view_all = _caller_identity(request)
     if not username:
         return web.json_response({"error": "Authentication required"}, status=401)
 
@@ -517,19 +536,25 @@ async def api_workflow_runs_active(request):
         from ..globals import access_control
 
         active = access_control.get_active_runs_snapshot()
-        if not admin:
+        if not can_view_all:
             active = [
                 r
                 for r in active
                 if (r.get("username") or "").lower() == username.lower()
                 or r.get("user_id") == user_id
             ]
+        # Normalize job_id alias
+        for r in active:
+            if "job_id" not in r:
+                r["job_id"] = r.get("prompt_id")
         return web.json_response(
             {
                 "active": active,
                 "count": len(active),
                 "viewer": username,
+                "role": role,
                 "is_admin": admin,
+                "can_view_all_runs": can_view_all,
             }
         )
     except Exception as e:

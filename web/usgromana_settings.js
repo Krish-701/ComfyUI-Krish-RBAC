@@ -708,68 +708,87 @@ class usgromanaDialog extends ComfyDialog {
         }
         this.element.innerHTML = `<div style="padding:50px; text-align:center;">Loading System Configuration...</div>`;
         
-        // Fetch fresh data
-        const [me, groups, users] = await Promise.all([
-            getData("/usgromana/api/me"),
-            getData("/usgromana/api/groups"),
-            getData("/usgromana/api/users")
-        ]);
-
+        // Fetch identity first (always available). Groups/users only for admins.
+        const me = await getData("/usgromana/api/me");
         currentUser = me;
-        groupsConfig = groups?.groups || {};
-        const usersList = users?.users || [];
 
-        // Admin Guard
-        if (!currentUser || !currentUser.is_admin) {
+        if (!currentUser || !currentUser.username) {
             this.element.innerHTML = `
                 <div style="padding:40px; text-align:center; color:#ff6b6b;">
-                    <h2>Access Denied</h2>
-                    <p>Administrative privileges are required to modify system policies.</p>
+                    <h2>Login Required</h2>
+                    <p>Sign in to view the workflow run log.</p>
                     <br><button id='s-close-btn' class='usgromana-btn'>Close</button>
                 </div>`;
             this.element.querySelector("#s-close-btn").onclick = () => this.close();
             return;
         }
 
-        // Get extension tabs
-        const extensionTabs = window.UsgromanaAdminTabs.getAll();
+        const isAdmin = !!currentUser.is_admin;
+        const canViewAllRuns = !!(currentUser.can_view_all_runs || isAdmin || currentUser.role === "power");
+        // Admin: full policy UI. Power/user: Run Log only (scoped by role on the API).
+        const fullAdmin = isAdmin;
+
+        let groups = null;
+        let usersList = [];
+        if (fullAdmin) {
+            const [groupsData, usersData] = await Promise.all([
+                getData("/usgromana/api/groups"),
+                getData("/usgromana/api/users"),
+            ]);
+            groups = groupsData;
+            groupsConfig = groups?.groups || {};
+            usersList = usersData?.users || [];
+        } else {
+            groupsConfig = {};
+        }
+
+        // Get extension tabs (admin only)
+        const extensionTabs = fullAdmin ? window.UsgromanaAdminTabs.getAll() : [];
         
         // Build tabs HTML (built-in tabs first, then extension tabs)
-        const builtInTabs = [
-            { id: "users", label: "Users & Roles", order: 0 },
-            { id: "perms", label: "Permissions", order: 1 },
-            { id: "ui-defaults", label: "Default UI", order: 2 },
-            { id: "ip", label: "IP Rules", order: 3 },
-            { id: "env", label: "User Env", order: 4 },
-            { id: "runs", label: "Run Log", order: 5 },
-            { id: "nsfw", label: "NSFW Management", order: 6 }
-        ];
+        const builtInTabs = fullAdmin
+            ? [
+                { id: "users", label: "Users & Roles", order: 0 },
+                { id: "perms", label: "Permissions", order: 1 },
+                { id: "ui-defaults", label: "Default UI", order: 2 },
+                { id: "ip", label: "IP Rules", order: 3 },
+                { id: "env", label: "User Env", order: 4 },
+                { id: "runs", label: "Run Log", order: 5 },
+                { id: "nsfw", label: "NSFW Management", order: 6 }
+            ]
+            : [
+                { id: "runs", label: canViewAllRuns ? "Run Log (All Users)" : "My Run Log", order: 0 }
+            ];
         
         // Combine and sort all tabs
         const allTabs = [...builtInTabs, ...extensionTabs.map(t => ({ id: t.id, label: t.label, order: t.order }))];
         allTabs.sort((a, b) => a.order - b.order);
+        const defaultTabId = fullAdmin ? "users" : "runs";
         
-        // Build tabs HTML - mark "users" tab as active (first built-in tab)
+        // Build tabs HTML - mark default tab as active
         // Escape tab.label to prevent XSS (tab.id is already validated during registration)
-        const tabsHTML = allTabs.map((tab, index) => {
-            const isActive = tab.id === "users" || (index === 0 && !builtInTabs.some(bt => bt.id === tab.id));
+        const tabsHTML = allTabs.map((tab) => {
+            const isActive = tab.id === defaultTabId;
             // ID is validated during registration (lowercase alphanumeric + underscore/hyphen), safe for HTML attributes
             // Label needs escaping as it's user-provided text
             const escapedLabel = escapeHtml(tab.label);
             return `<div class="usgromana-tab${isActive ? ' active' : ''}" data-tab="${tab.id}">${escapedLabel}</div>`;
         }).join("");
         
-        // Build content containers HTML - mark "users" content as active
+        // Build content containers HTML
         // tab.id is already validated during registration (lowercase alphanumeric + underscore/hyphen)
-        const contentHTML = allTabs.map((tab, index) => {
-            const isActive = tab.id === "users" || (index === 0 && !builtInTabs.some(bt => bt.id === tab.id));
+        const contentHTML = allTabs.map((tab) => {
+            const isActive = tab.id === defaultTabId;
             return `<div class="usgromana-content${isActive ? ' active' : ''}" id="usgromana-tab-${tab.id}"></div>`;
         }).join("");
         
         // Render Layout
+        const title = fullAdmin
+            ? "Usgromana Security Policy"
+            : (canViewAllRuns ? "Workflow Run Log" : "My Workflow Runs");
         this.element.innerHTML = `
             <div class="usgromana-modal-header">
-                <span class="usgromana-modal-title">Usgromana Security Policy</span>
+                <span class="usgromana-modal-title">${escapeHtml(title)}</span>
                 <button class="usgromana-modal-close">✕</button>
             </div>
             <div class="usgromana-modal-body">
@@ -800,14 +819,16 @@ class usgromanaDialog extends ComfyDialog {
             }
         });
 
-        // Fill Data - Built-in tabs
-        this.renderUsers(usersList, this.element.querySelector("#usgromana-tab-users"));
-        this.renderPerms(this.element.querySelector("#usgromana-tab-perms"));
-        await this.renderIpRules(this.element.querySelector("#usgromana-tab-ip"));
-        this.renderUserEnv(this.element.querySelector("#usgromana-tab-env"), usersList);
-        await this.renderUiDefaults(this.element.querySelector("#usgromana-tab-ui-defaults"));
+        // Fill Data - Built-in tabs (admin-only tabs skip for power/user)
+        if (fullAdmin) {
+            this.renderUsers(usersList, this.element.querySelector("#usgromana-tab-users"));
+            this.renderPerms(this.element.querySelector("#usgromana-tab-perms"));
+            await this.renderIpRules(this.element.querySelector("#usgromana-tab-ip"));
+            this.renderUserEnv(this.element.querySelector("#usgromana-tab-env"), usersList);
+            await this.renderUiDefaults(this.element.querySelector("#usgromana-tab-ui-defaults"));
+            this.renderNsfwManagement(this.element.querySelector("#usgromana-tab-nsfw"));
+        }
         await this.renderRunLog(this.element.querySelector("#usgromana-tab-runs"), usersList);
-        this.renderNsfwManagement(this.element.querySelector("#usgromana-tab-nsfw"));
         
         // Fill Data - Extension tabs
         const context = {
@@ -1603,6 +1624,13 @@ renderUserEnv(container, usersList) {
 async renderRunLog(container, usersList) {
     if (!container) return;
 
+    const canViewAll = !!(
+        currentUser?.can_view_all_runs ||
+        currentUser?.is_admin ||
+        currentUser?.role === "power"
+    );
+    const isAdmin = !!currentUser?.is_admin;
+
     const userOptions = (usersList || [])
         .map((u) => {
             const name = u.username || "";
@@ -1610,38 +1638,49 @@ async renderRunLog(container, usersList) {
         })
         .join("");
 
+    const scopeNote = canViewAll
+        ? "You can see <strong>all users</strong> (admin/power). Regular users only see their own runs."
+        : "You only see <strong>your own</strong> runs and outputs. Other users cannot see yours.";
+
     container.innerHTML = `
         <div class="usgromana-section">
-            <h3>Workflow Run Log</h3>
+            <h3>${canViewAll ? "Workflow Run Log" : "My Workflow Runs"}</h3>
             <p>
-                Every queued workflow is recorded with <strong>who ran it</strong>,
-                <strong>when</strong>, and the <strong>workflow name</strong>.
-                Active jobs also appear on the bottom status bar while ComfyUI is open.
+                Each run stores <strong>user</strong>, <strong>job id</strong>, <strong>time</strong>,
+                and <strong>workflow name</strong>. ${scopeNote}
             </p>
 
             <div class="usgromana-row" style="gap:8px; flex-wrap:wrap; align-items:flex-end;">
+                <div style="flex:1; min-width:220px;">
+                    <label class="usgromana-field-label">Search (job id, user, workflow, status…)</label>
+                    <input type="search" id="usgromana-runs-search" class="usgromana-select"
+                        placeholder="Paste job id or type a name…"
+                        style="width:100%; padding:8px 10px;" />
+                </div>
+                ${canViewAll ? `
                 <div>
                     <label class="usgromana-field-label">Filter user</label>
                     <select id="usgromana-runs-user" class="usgromana-select">
                         <option value="">All users</option>
                         ${userOptions}
                     </select>
-                </div>
+                </div>` : `<input type="hidden" id="usgromana-runs-user" value="" />`}
                 <div style="display:flex; gap:8px; align-items:flex-end;">
                     <button class="usgromana-btn secondary" id="usgromana-runs-refresh">Refresh</button>
-                    <button class="usgromana-btn danger" id="usgromana-runs-clear">Clear log</button>
+                    ${isAdmin ? `<button class="usgromana-btn danger" id="usgromana-runs-clear">Clear log</button>` : ""}
                 </div>
             </div>
 
             <div id="usgromana-runs-active" style="margin-top:12px;"></div>
             <div id="usgromana-runs-stats" style="margin-top:12px;"></div>
 
-            <div style="margin-top:14px; overflow:auto; max-height:360px;">
+            <div style="margin-top:14px; overflow:auto; max-height:420px;">
                 <table class="usgromana-table" id="usgromana-runs-table">
                     <thead>
                         <tr>
                             <th>Time (UTC)</th>
-                            <th>User</th>
+                            <th>Job ID</th>
+                            ${canViewAll ? "<th>User</th>" : ""}
                             <th>Workflow</th>
                             <th>Status</th>
                             <th>Duration</th>
@@ -1649,7 +1688,7 @@ async renderRunLog(container, usersList) {
                         </tr>
                     </thead>
                     <tbody id="usgromana-runs-tbody">
-                        <tr><td colspan="6" style="text-align:center;opacity:.7;">Loading…</td></tr>
+                        <tr><td colspan="7" style="text-align:center;opacity:.7;">Loading…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1660,12 +1699,14 @@ async renderRunLog(container, usersList) {
     `;
 
     const userSelect = container.querySelector("#usgromana-runs-user");
+    const searchInput = container.querySelector("#usgromana-runs-search");
     const tbody = container.querySelector("#usgromana-runs-tbody");
     const statsEl = container.querySelector("#usgromana-runs-stats");
     const activeEl = container.querySelector("#usgromana-runs-active");
     const metaEl = container.querySelector("#usgromana-runs-meta");
     const refreshBtn = container.querySelector("#usgromana-runs-refresh");
     const clearBtn = container.querySelector("#usgromana-runs-clear");
+    const colSpan = canViewAll ? 7 : 6;
 
     const fmtDuration = (sec) => {
         if (sec == null || sec === "") return "—";
@@ -1686,19 +1727,31 @@ async renderRunLog(container, usersList) {
         return "#ccc";
     };
 
-    const load = async () => {
-        const filterUser = (userSelect?.value || "").trim();
-        const q = new URLSearchParams();
-        q.set("limit", "200");
-        if (filterUser) q.set("user", filterUser);
+    const shortJob = (id) => {
+        if (!id) return "—";
+        const s = String(id);
+        if (s.length <= 14) return s;
+        return s.slice(0, 8) + "…" + s.slice(-4);
+    };
 
-        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;opacity:.7;">Loading…</td></tr>`;
+    const load = async () => {
+        const filterUser = canViewAll ? (userSelect?.value || "").trim() : "";
+        const search = (searchInput?.value || "").trim();
+        const q = new URLSearchParams();
+        q.set("limit", "300");
+        if (filterUser) q.set("user", filterUser);
+        if (search) q.set("q", search);
+
+        tbody.innerHTML = `<tr><td colspan="${colSpan}" style="text-align:center;opacity:.7;">Loading…</td></tr>`;
 
         try {
+            const statsQ = new URLSearchParams();
+            if (filterUser) statsQ.set("user", filterUser);
+
             const [runsRes, statsRes, activeRes] = await Promise.all([
                 fetch(`${WORKFLOW_RUNS_API}?${q}`, { credentials: "include" }),
                 fetch(
-                    `${WORKFLOW_RUNS_STATS_API}${filterUser ? `?user=${encodeURIComponent(filterUser)}` : ""}`,
+                    `${WORKFLOW_RUNS_STATS_API}${statsQ.toString() ? `?${statsQ}` : ""}`,
                     { credentials: "include" }
                 ),
                 fetch(WORKFLOW_RUNS_ACTIVE_API, { credentials: "include" }),
@@ -1716,12 +1769,15 @@ async renderRunLog(container, usersList) {
                         <strong>Active now (${active.length})</strong>
                         <ul style="margin:6px 0 0 18px;padding:0;">
                             ${active
-                                .map(
-                                    (r) =>
-                                        `<li><b>${escapeHtml(r.username || "?")}</b> — ${escapeHtml(
-                                            r.workflow_name || "Unnamed"
-                                        )} <span style="opacity:.7">(${escapeHtml(r.status || "")})</span></li>`
-                                )
+                                .map((r) => {
+                                    const jid = r.job_id || r.prompt_id || "";
+                                    return `<li>
+                                        ${canViewAll ? `<b>${escapeHtml(r.username || "?")}</b> — ` : ""}
+                                        ${escapeHtml(r.workflow_name || "Unnamed")}
+                                        <span style="opacity:.7">(${escapeHtml(r.status || "")})</span>
+                                        ${jid ? `<code style="margin-left:6px;font-size:11px;" title="${escapeHtml(String(jid))}">${escapeHtml(shortJob(jid))}</code>` : ""}
+                                    </li>`;
+                                })
                                 .join("")}
                         </ul>
                     </div>`;
@@ -1759,14 +1815,21 @@ async renderRunLog(container, usersList) {
             // History rows
             const runs = runsData.runs || [];
             if (!runs.length) {
-                tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;opacity:.7;">No runs recorded yet.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="${colSpan}" style="text-align:center;opacity:.7;">${
+                    search ? "No runs match your search." : "No runs recorded yet."
+                }</td></tr>`;
             } else {
                 tbody.innerHTML = runs
                     .map((r) => {
                         const st = r.status || "—";
+                        const jid = r.job_id || r.prompt_id || "";
+                        const jobCell = jid
+                            ? `<code title="Click to copy full id" class="usgromana-job-id" data-job="${escapeHtml(String(jid))}" style="cursor:pointer;font-size:11px;word-break:break-all;">${escapeHtml(shortJob(jid))}</code>`
+                            : "—";
                         return `<tr>
                             <td style="white-space:nowrap;">${escapeHtml(r.started_at || "—")}</td>
-                            <td><strong>${escapeHtml(r.username || "?")}</strong></td>
+                            <td>${jobCell}</td>
+                            ${canViewAll ? `<td><strong>${escapeHtml(r.username || "?")}</strong></td>` : ""}
                             <td>${escapeHtml(r.workflow_name || "Unnamed workflow")}</td>
                             <td style="color:${statusColor(st)};font-weight:600;">${escapeHtml(st)}</td>
                             <td>${fmtDuration(r.duration_sec)}</td>
@@ -1774,41 +1837,73 @@ async renderRunLog(container, usersList) {
                         </tr>`;
                     })
                     .join("");
+
+                tbody.querySelectorAll(".usgromana-job-id").forEach((el) => {
+                    el.onclick = async () => {
+                        const full = el.dataset.job || el.textContent;
+                        try {
+                            await navigator.clipboard.writeText(full);
+                            el.style.outline = "1px solid #3dd68c";
+                            setTimeout(() => { el.style.outline = ""; }, 800);
+                        } catch {
+                            window.prompt("Job ID:", full);
+                        }
+                    };
+                });
             }
 
-            metaEl.textContent = `Showing ${runs.length} of ${runsData.total || runs.length} run(s).`;
+            const searchNote = search ? ` · search “${search}”` : "";
+            metaEl.textContent = `Showing ${runs.length} of ${runsData.total || runs.length} run(s)${searchNote}.`;
         } catch (e) {
             console.error("[Usgromana] run log load failed:", e);
-            tbody.innerHTML = `<tr><td colspan="6" style="color:#ff6b6b;text-align:center;">Failed to load run log. See console.</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="${colSpan}" style="color:#ff6b6b;text-align:center;">Failed to load run log. See console.</td></tr>`;
             metaEl.textContent = "";
         }
     };
 
+    let searchTimer = null;
     refreshBtn.onclick = () => load();
-    userSelect.onchange = () => load();
-    clearBtn.onclick = async () => {
-        const filterUser = (userSelect?.value || "").trim();
-        const msg = filterUser
-            ? `Clear run history for user "${filterUser}"?`
-            : "Clear ALL workflow run history?";
-        if (!confirm(msg)) return;
-        try {
-            const q = filterUser ? `?user=${encodeURIComponent(filterUser)}` : "";
-            const res = await fetch(`${WORKFLOW_RUNS_API}${q}`, {
-                method: "DELETE",
-                credentials: "include",
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                alert(data.error || `Clear failed (${res.status})`);
-                return;
+    if (userSelect && userSelect.tagName === "SELECT") {
+        userSelect.onchange = () => load();
+    }
+    if (searchInput) {
+        searchInput.oninput = () => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => load(), 280);
+        };
+        searchInput.onkeydown = (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                clearTimeout(searchTimer);
+                load();
             }
-            await load();
-        } catch (e) {
-            console.error("[Usgromana] clear run log failed:", e);
-            alert("Failed to clear run log.");
-        }
-    };
+        };
+    }
+    if (clearBtn) {
+        clearBtn.onclick = async () => {
+            const filterUser = canViewAll ? (userSelect?.value || "").trim() : "";
+            const msg = filterUser
+                ? `Clear run history for user "${filterUser}"?`
+                : "Clear ALL workflow run history?";
+            if (!confirm(msg)) return;
+            try {
+                const q = filterUser ? `?user=${encodeURIComponent(filterUser)}` : "";
+                const res = await fetch(`${WORKFLOW_RUNS_API}${q}`, {
+                    method: "DELETE",
+                    credentials: "include",
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    alert(data.error || `Clear failed (${res.status})`);
+                    return;
+                }
+                await load();
+            } catch (e) {
+                console.error("[Usgromana] clear run log failed:", e);
+                alert("Failed to clear run log.");
+            }
+        };
+    }
 
     await load();
 }
