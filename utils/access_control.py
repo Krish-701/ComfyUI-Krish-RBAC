@@ -454,6 +454,11 @@ class AccessControl:
             # Mark run as actively executing
             try:
                 meta, body = _usgromana_meta_from_queue_entry(entry)
+                # Critical: bind worker output dirs to the job owner, not the
+                # last HTTP request (admin polling must not steal another user's saves).
+                owner_id = meta.get("user_id")
+                if owner_id:
+                    self.set_current_user_id(owner_id, set_fallback=True)
                 prompt_id = body[1] if isinstance(body, tuple) and len(body) > 1 else None
                 if prompt_id:
                     from .workflow_run_log import get_run_log
@@ -547,42 +552,19 @@ class AccessControl:
 
     def _history_entry_for_viewer(self, entry: dict, *, can_view_all: bool) -> dict:
         """
-        Deep-copy a history row for the API. For privileged viewers, rewrite
-        image/media subfolders to ``<owner_user_id>/...`` so previews resolve
-        under the global output root.
+        Copy a history row for the API.
+
+        Image paths are left as Comfy saved them (relative to that job owner's
+        output/temp root). Do NOT rewrite subfolders here — that caused
+        "Image failed to load" when combined with per-user folder chroots.
+        Privileged /view resolution searches all user folders instead.
         """
         out = copy.deepcopy(entry)
         if "prompt" in out:
             out["prompt"] = sanitize_prompt_tuple_for_api(out["prompt"])
-        if not can_view_all:
-            return out
-
-        owner = out.get("user_id")
-        if not owner:
-            return out
-
-        outputs = out.get("outputs")
-        if not isinstance(outputs, dict):
-            return out
-
-        media_keys = ("images", "gifs", "videos", "audio", "files")
-        for node_out in outputs.values():
-            if not isinstance(node_out, dict):
-                continue
-            for key in media_keys:
-                items = node_out.get(key)
-                if not isinstance(items, list):
-                    continue
-                for media in items:
-                    if not isinstance(media, dict):
-                        continue
-                    mtype = media.get("type") or "output"
-                    if mtype not in ("output", "temp", "input"):
-                        continue
-                    sub = (media.get("subfolder") or "").replace("\\", "/").strip("/")
-                    if sub == owner or sub.startswith(f"{owner}/"):
-                        continue
-                    media["subfolder"] = f"{owner}/{sub}".strip("/") if sub else str(owner)
+        # Expose runner identity for UI without altering media paths
+        if can_view_all and out.get("username"):
+            out.setdefault("usgromana_username", out.get("username"))
         return out
 
     def user_queue_get_current_queue(self):

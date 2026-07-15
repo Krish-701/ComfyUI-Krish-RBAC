@@ -1713,6 +1713,77 @@ def _request_wants_generated_assets(request: web.Request) -> bool:
     return "output" in tags
 
 
+async def _try_serve_cross_user_view(request: web.Request):
+    """
+    Serve /view images from any user's output/temp folder for admin/power.
+
+    Comfy saves into output/<user_id>/filename with empty subfolder. Privileged
+    viewers use a different chroot, so native /view 404s — resolve across users.
+    """
+    from .media_paths import resolve_output_file_path, global_temp_directory
+
+    q = request.rel_url.query
+    filename = q.get("filename") or q.get("file") or q.get("name")
+    if not filename or ".." in filename.replace("\\", "/"):
+        return None
+    img_type = (q.get("type") or "output").lower()
+    subfolder = q.get("subfolder") or ""
+
+    path = None
+    if img_type == "output":
+        path = resolve_output_file_path(filename, subfolder)
+        if not path:
+            # Brute-search first-level user dirs under global output
+            base = global_output_directory()
+            name = filename.replace("\\", "/").split("/")[-1]
+            sub = subfolder.replace("\\", "/").strip("/")
+            try:
+                for entry in os.listdir(base):
+                    root = os.path.join(base, entry)
+                    if not os.path.isdir(root):
+                        continue
+                    candidates = [
+                        os.path.join(root, name),
+                        os.path.join(root, sub, name) if sub else "",
+                        os.path.join(base, sub, name) if sub else "",
+                    ]
+                    for c in candidates:
+                        if c and os.path.isfile(c):
+                            path = c
+                            break
+                    if path:
+                        break
+            except OSError:
+                pass
+    elif img_type == "temp":
+        base = global_temp_directory()
+        name = filename.replace("\\", "/").split("/")[-1]
+        sub = subfolder.replace("\\", "/").strip("/")
+        for c in (
+            os.path.join(base, sub, name) if sub else "",
+            os.path.join(base, name),
+        ):
+            if c and os.path.isfile(c):
+                path = c
+                break
+        if not path:
+            try:
+                for entry in os.listdir(base):
+                    root = os.path.join(base, entry)
+                    if not os.path.isdir(root):
+                        continue
+                    c = os.path.join(root, name)
+                    if os.path.isfile(c):
+                        path = c
+                        break
+            except OSError:
+                pass
+
+    if not path or not os.path.isfile(path):
+        return None
+    return web.FileResponse(path)
+
+
 def create_comfy_user_middleware():
     """Middleware: sync JWT user into ComfyUI user manager."""
 
@@ -1723,9 +1794,13 @@ def create_comfy_user_middleware():
         user_id = get_comfy_user_id_for_request(request)
         username = request.get("user") if isinstance(request.get("user"), str) else None
 
+        path = request.path or ""
         if user_id:
             sync_user_to_comfy_manager(user_id, username or user_id)
-            access_control.set_current_user_id(user_id, set_fallback=True)
+            # Never set_fallback on random polls (/history, /view, /queue) — that
+            # overwrites the worker's job-owner and saves images into the wrong folder.
+            is_prompt = path in ("/prompt", "/api/prompt") or path.startswith("/api/prompt")
+            access_control.set_current_user_id(user_id, set_fallback=is_prompt)
 
         if username:
             try:
@@ -1735,17 +1810,11 @@ def create_comfy_user_middleware():
             except Exception:
                 pass
 
-        path = request.path or ""
         can_view_all = bool(user_id and access_control.user_can_view_all(user_id))
 
-        # Admin/power: resolve /view and related media from the global tree so
-        # history previews with subfolder=<other_user_id>/... work.
-        media_paths = (
-            path == "/view"
-            or path.startswith("/view?")
-            or path.rstrip("/") in ("/history", "/api/history", "/queue", "/api/queue")
-            or path.rstrip("/").startswith("/api/view")
-        )
+        # Only /view uses global media roots for privileged users (optional fallback).
+        # Do NOT enable this for /history or /queue — it breaks image path resolution.
+        media_paths = path == "/view" or path.rstrip("/").startswith("/api/view")
         global_media_cm = (
             use_global_media_root(True)
             if (can_view_all and media_paths)
@@ -1822,6 +1891,19 @@ def create_comfy_user_middleware():
                     _sync_allow_all_output(force=False, user_id=user_id)
                 elif user_id:
                     _sync_output_index_if_needed(user_id, force=False)
+
+        # Privileged /view: if Comfy would miss per-user files, serve from any user folder.
+        if (
+            can_view_all
+            and request.method == "GET"
+            and (path == "/view" or path.rstrip("/").startswith("/api/view"))
+        ):
+            try:
+                served = await _try_serve_cross_user_view(request)
+                if served is not None:
+                    return served
+            except Exception as e:
+                _log.debug("cross-user view serve skipped: %s", e)
 
         with global_media_cm:
             response = await handler(request)

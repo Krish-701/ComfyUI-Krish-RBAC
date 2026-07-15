@@ -237,6 +237,22 @@ class UsersDB:
             return None, {}
         return user_id, user_data
 
+    def set_password(self, username: str, new_password: str) -> bool:
+        """
+        Reset a user's password by username (or email). Returns True on success.
+        """
+        if not username or not new_password:
+            return False
+        user_id, user_data = self.get_user(username)
+        if not user_id or not user_data:
+            return False
+        self.load_users()
+        if user_id not in self.users:
+            return False
+        self.users[user_id]["password"] = self.hash_password(new_password)
+        self.save_users(self.users)
+        return True
+
     def get_admin_user(self) -> tuple[str | None, dict] | None:
         """
         Get the admin user from the database.
