@@ -9,6 +9,7 @@ import { api } from "../../scripts/api.js";
 
 const ME_URL = "/usgromana/api/me";
 const ACTIVE_URL = "/usgromana/api/workflow-runs/active";
+const QUEUE_STATUS_URL = "/usgromana/api/queue-status";
 
 let cachedMe = null;
 let statusEl = null;
@@ -56,17 +57,16 @@ function getWorkflowName() {
 }
 
 function showToast(message, type = "info") {
+    const life = type === "error" ? 7000 : 5000;
     // Prefer existing denial toast / comfy toast systems
     try {
-        if (app.ui?.dialog?.show) {
-            // non-blocking: use a lightweight toast if available
-        }
         if (window.app?.extensionManager?.toast?.add) {
             window.app.extensionManager.toast.add({
-                severity: type === "error" ? "error" : "info",
-                summary: "Workflow Run",
+                severity:
+                    type === "error" ? "error" : type === "warn" ? "warn" : "info",
+                summary: type === "error" ? "Queue Limit" : "Workflow Queue",
                 detail: message,
-                life: 3500,
+                life,
             });
             return;
         }
@@ -84,10 +84,14 @@ function showToast(message, type = "info") {
     }
     const el = document.createElement("div");
     el.textContent = message;
+    const border =
+        type === "error"
+            ? "rgba(255,100,100,0.55)"
+            : "rgba(100,160,255,0.45)";
     el.style.cssText =
-        "background:rgba(20,20,30,0.92);color:#e8f0ff;border:1px solid rgba(100,160,255,0.45);" +
+        `background:rgba(20,20,30,0.92);color:#e8f0ff;border:1px solid ${border};` +
         "padding:10px 14px;border-radius:10px;font:13px/1.35 system-ui,sans-serif;" +
-        "box-shadow:0 8px 24px rgba(0,0,0,0.35);max-width:360px;opacity:0;transition:opacity .2s;";
+        "box-shadow:0 8px 24px rgba(0,0,0,0.35);max-width:420px;opacity:0;transition:opacity .2s;white-space:pre-wrap;";
     host.appendChild(el);
     requestAnimationFrame(() => {
         el.style.opacity = "1";
@@ -95,7 +99,30 @@ function showToast(message, type = "info") {
     setTimeout(() => {
         el.style.opacity = "0";
         setTimeout(() => el.remove(), 250);
-    }, 4000);
+    }, life);
+}
+
+function formatQueueMessage(workflowName, username, data) {
+    const q = data?.usgromana_queue || data || {};
+    const wait = q.waiting_number ?? data?.waiting_number;
+    const ahead = q.jobs_ahead ?? data?.jobs_ahead;
+    const active = q.active ?? data?.queue_active;
+    const max = q.max_jobs ?? data?.queue_max;
+    const who = username || cachedMe?.username || "user";
+    const wf = workflowName || "workflow";
+    let msg = `Queued as ${who}: ${wf}`;
+    if (wait != null) {
+        msg += `\nYour waiting number: #${wait}`;
+        if (ahead != null && ahead > 0) {
+            msg += ` (${ahead} job${ahead === 1 ? "" : "s"} ahead)`;
+        } else if (ahead === 0) {
+            msg += " (next / running soon)";
+        }
+    }
+    if (max && max > 0 && active != null) {
+        msg += `\nYour slots: ${active}/${max} in use`;
+    }
+    return msg;
 }
 
 function ensureStatusBar() {
@@ -112,42 +139,59 @@ function ensureStatusBar() {
     return statusEl;
 }
 
-function renderActiveBar(payload) {
+function renderActiveBar(payload, queueStatus) {
     const bar = ensureStatusBar();
     const active = payload?.active || [];
-    if (!active.length) {
+    const q = queueStatus || {};
+    const parts = [];
+
+    if (q.waiting_number != null && (q.active > 0 || active.length)) {
+        parts.push(
+            `You: wait #${q.waiting_number}` +
+                (q.max_jobs > 0 ? ` · slots ${q.active || 0}/${q.max_jobs}` : "")
+        );
+    }
+
+    if (active.length) {
+        const bits = active.slice(0, 3).map((r) => {
+            const who = r.username || "unknown";
+            const wf = r.workflow_name || "Unnamed";
+            const st = r.status === "running" ? "▶" : "…";
+            return `${st} ${who}: ${wf}`;
+        });
+        const more = active.length > 3 ? ` (+${active.length - 3})` : "";
+        parts.push(`Queue · ${bits.join(" | ")}${more}`);
+    }
+
+    if (!parts.length) {
         bar.style.display = "none";
         bar.textContent = "";
         return;
     }
-    const bits = active.slice(0, 4).map((r) => {
-        const who = r.username || "unknown";
-        const wf = r.workflow_name || "Unnamed";
-        const st = r.status === "running" ? "▶" : "…";
-        const jid = r.job_id || r.prompt_id || "";
-        const jshort =
-            jid && String(jid).length > 12
-                ? String(jid).slice(0, 6) + "…"
-                : jid;
-        return jshort ? `${st} ${who}: ${wf} [${jshort}]` : `${st} ${who}: ${wf}`;
-    });
-    const more = active.length > 4 ? ` (+${active.length - 4} more)` : "";
-    bar.textContent = `Runs · ${bits.join("  |  ")}${more}`;
-    bar.title = active
-        .map(
+    bar.textContent = parts.join("  ·  ");
+    bar.title = [
+        q.waiting_number != null
+            ? `Your waiting number: #${q.waiting_number} (${q.jobs_ahead || 0} ahead)`
+            : "",
+        ...(active || []).map(
             (r) =>
                 `${r.status || "?"} | ${r.username || "?"} | ${r.workflow_name || "?"} | job:${r.job_id || r.prompt_id || ""}`
-        )
+        ),
+    ]
+        .filter(Boolean)
         .join("\n");
     bar.style.display = "block";
 }
 
 async function pollActive() {
     try {
-        const res = await fetch(ACTIVE_URL, { credentials: "include" });
-        if (!res.ok) return;
-        const data = await res.json();
-        renderActiveBar(data);
+        const [activeRes, statusRes] = await Promise.all([
+            fetch(ACTIVE_URL, { credentials: "include" }),
+            fetch(QUEUE_STATUS_URL, { credentials: "include" }),
+        ]);
+        const data = activeRes.ok ? await activeRes.json() : { active: [] };
+        const qStatus = statusRes.ok ? await statusRes.json() : null;
+        renderActiveBar(data, qStatus);
     } catch {
         /* ignore */
     }
@@ -241,11 +285,33 @@ function installQueueHooks() {
                         const { body, workflowName, username } = tagPromptPayload(parsed);
                         init = { ...init, body: JSON.stringify(body) };
                         const res = await origFetch(input, init);
+                        let data = null;
+                        try {
+                            data = await res.clone().json();
+                        } catch {
+                            data = null;
+                        }
                         if (res.ok) {
                             showToast(
-                                `Queued as ${username || cachedMe?.username || "user"}: ${workflowName}`
+                                formatQueueMessage(workflowName, username, data),
+                                "info"
                             );
                             pollActive();
+                        } else if (res.status === 429 || data?.code === "QUEUE_LIMIT") {
+                            const err =
+                                data?.error ||
+                                "Queue limit reached. Wait until a job finishes.";
+                            const q = data?.usgromana_queue;
+                            let msg = err;
+                            if (q?.waiting_number) {
+                                msg += `\nYour current waiting number: #${q.waiting_number}`;
+                            }
+                            if (q?.active != null && q?.max_jobs) {
+                                msg += `\nSlots in use: ${q.active}/${q.max_jobs}`;
+                            }
+                            showToast(msg, "error");
+                        } else if (data?.error) {
+                            showToast(String(data.error), "error");
                         }
                         return res;
                     } catch {

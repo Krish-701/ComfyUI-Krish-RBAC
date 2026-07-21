@@ -58,6 +58,15 @@ class _GlobalMediaRoot:
         return False
 
 
+class QueueLimitExceeded(Exception):
+    """Raised when a user already has the max number of active jobs."""
+
+    def __init__(self, info: dict):
+        self.info = info or {}
+        msg = self.info.get("error") or "Queue limit exceeded"
+        super().__init__(msg)
+
+
 def _usgromana_meta_from_queue_entry(entry):
     """Split Usgromana ``{user_id}`` tail from a queue heap entry."""
     if isinstance(entry, tuple) and entry and isinstance(entry[-1], dict):
@@ -175,6 +184,83 @@ class AccessControl:
             return role, perms, username
         except Exception:
             return "guest", {}, None
+
+    def create_queue_limit_middleware(self):
+        """
+        Enforce per-user queue caps on /prompt and attach waiting position
+        to successful queue responses. Catches QueueLimitExceeded from put().
+        """
+        import json as _json
+
+        @web.middleware
+        async def middleware(request: web.Request, handler):
+            path = request.path or ""
+            is_prompt = request.method in ("POST", "PUT") and (
+                path in ("/prompt", "/api/prompt") or path.rstrip("/").endswith("/prompt")
+            )
+            if not is_prompt:
+                return await handler(request)
+
+            uid = self.get_current_user_id()
+            # Pre-check (put also checks under lock)
+            try:
+                status = self.get_user_queue_status(uid)
+                if not status.get("can_submit") and not status.get("unlimited"):
+                    return web.json_response(
+                        {
+                            "error": (
+                                f"Queue limit: max {status.get('max_jobs')} job(s) at a time. "
+                                f"You have {status.get('active')} active "
+                                f"({status.get('running')} running, {status.get('pending')} waiting). "
+                                f"Wait until one finishes."
+                            ),
+                            "code": "QUEUE_LIMIT",
+                            "usgromana_queue": status,
+                        },
+                        status=429,
+                    )
+            except Exception as e:
+                print(f"[Usgromana] queue pre-check error: {e}")
+
+            try:
+                response = await handler(request)
+            except QueueLimitExceeded as e:
+                info = dict(e.info or {})
+                try:
+                    info["usgromana_queue"] = self.get_user_queue_status(uid)
+                except Exception:
+                    pass
+                return web.json_response(info, status=429)
+            except Exception as e:
+                # Some Comfy versions wrap exceptions
+                cause = getattr(e, "__cause__", None) or getattr(e, "__context__", None)
+                if isinstance(e, QueueLimitExceeded):
+                    return web.json_response(e.info or {"error": str(e)}, status=429)
+                if isinstance(cause, QueueLimitExceeded):
+                    return web.json_response(cause.info or {"error": str(cause)}, status=429)
+                raise
+
+            # Enrich successful prompt response with waiting number
+            try:
+                if response.status == 200 and hasattr(response, "body") and response.body:
+                    ctype = (response.content_type or "").lower()
+                    if "json" in ctype:
+                        payload = _json.loads(response.body)
+                        if isinstance(payload, dict) and "error" not in payload:
+                            qstatus = self.get_user_queue_status(uid)
+                            payload["usgromana_queue"] = qstatus
+                            # Friendly top-level fields for clients
+                            payload["waiting_number"] = qstatus.get("waiting_number")
+                            payload["jobs_ahead"] = qstatus.get("jobs_ahead")
+                            payload["queue_active"] = qstatus.get("active")
+                            payload["queue_max"] = qstatus.get("max_jobs")
+                            return web.json_response(payload, status=200)
+            except Exception as e:
+                print(f"[Usgromana] queue response enrich failed: {e}")
+
+            return response
+
+        return middleware
 
     def create_usgromana_middleware(self):
         @web.middleware
@@ -371,6 +457,142 @@ class AccessControl:
         self.__prompt_queue.get_history = self.user_queue_get_history
         self.__prompt_queue.wipe_history = self.user_queue_wipe_history
 
+    def _user_role_for_limit(self, user_key: str | None) -> str:
+        if not user_key:
+            return "guest"
+        try:
+            _, rec = self.users_db.get_user(user_id=user_key)
+            if not rec:
+                _, rec = self.users_db.get_user(username=user_key)
+            if not rec:
+                return "guest"
+            if rec.get("admin"):
+                return "admin"
+            groups = [str(g).lower() for g in (rec.get("groups") or [])]
+            for role in ("admin", "power", "user", "guest"):
+                if role in groups:
+                    return role
+        except Exception:
+            pass
+        return "user"
+
+    def _queue_limit_for_user(self, user_key: str | None) -> int:
+        """Max concurrent jobs (pending+running). 0 = unlimited."""
+        try:
+            from ..constants import MAX_QUEUE_JOBS_PER_USER, QUEUE_LIMIT_EXEMPT_ROLES
+        except Exception:
+            return 2
+        role = self._user_role_for_limit(user_key)
+        if role in QUEUE_LIMIT_EXEMPT_ROLES:
+            return 0
+        return max(0, int(MAX_QUEUE_JOBS_PER_USER or 0))
+
+    def _count_user_jobs_unlocked(self, user_id: str | None) -> dict:
+        """Count pending/running jobs for a user. Caller must hold queue mutex."""
+        pending = 0
+        running = 0
+        if not user_id:
+            return {"pending": 0, "running": 0, "active": 0}
+        for item in self.__prompt_queue.currently_running.values():
+            meta, _ = _usgromana_meta_from_queue_entry(item)
+            if meta.get("user_id") == user_id:
+                running += 1
+        for item in self.__prompt_queue.queue:
+            meta, _ = _usgromana_meta_from_queue_entry(item)
+            if meta.get("user_id") == user_id:
+                pending += 1
+        return {
+            "pending": pending,
+            "running": running,
+            "active": pending + running,
+        }
+
+    def count_user_jobs(self, user_id: str | None = None) -> dict:
+        uid = user_id if user_id is not None else self.get_current_user_id()
+        with self.__prompt_queue.mutex:
+            return self._count_user_jobs_unlocked(uid)
+
+    def get_user_queue_status(self, user_id: str | None = None) -> dict:
+        """
+        Status for the user: active job counts, limit, and wait positions
+        of their pending jobs in the global queue (1 = next to run).
+        """
+        uid = user_id if user_id is not None else self.get_current_user_id()
+        username = _resolve_username_for_queue(self.users_db, uid)
+        max_jobs = self._queue_limit_for_user(uid)
+        with self.__prompt_queue.mutex:
+            counts = self._count_user_jobs_unlocked(uid)
+            # Global ordered list: running first (as "executing"), then pending heap order
+            global_slots = []
+            for item in self.__prompt_queue.currently_running.values():
+                meta, body = _usgromana_meta_from_queue_entry(item)
+                prompt_id = body[1] if isinstance(body, tuple) and len(body) > 1 else None
+                global_slots.append(
+                    {
+                        "status": "running",
+                        "user_id": meta.get("user_id"),
+                        "username": meta.get("username")
+                        or _resolve_username_for_queue(self.users_db, meta.get("user_id")),
+                        "prompt_id": prompt_id,
+                        "workflow_name": meta.get("workflow_name") or "Unnamed workflow",
+                    }
+                )
+            # heap order = execution order
+            pending_sorted = sorted(
+                list(self.__prompt_queue.queue),
+                key=lambda e: e[0] if isinstance(e, tuple) and e else 0,
+            )
+            for item in pending_sorted:
+                meta, body = _usgromana_meta_from_queue_entry(item)
+                prompt_id = body[1] if isinstance(body, tuple) and len(body) > 1 else None
+                global_slots.append(
+                    {
+                        "status": "queued",
+                        "user_id": meta.get("user_id"),
+                        "username": meta.get("username")
+                        or _resolve_username_for_queue(self.users_db, meta.get("user_id")),
+                        "prompt_id": prompt_id,
+                        "workflow_name": meta.get("workflow_name") or "Unnamed workflow",
+                    }
+                )
+
+        my_positions = []
+        for idx, slot in enumerate(global_slots, start=1):
+            if slot.get("user_id") == uid:
+                my_positions.append(
+                    {
+                        "waiting_number": idx,
+                        "status": slot["status"],
+                        "prompt_id": slot.get("prompt_id"),
+                        "workflow_name": slot.get("workflow_name"),
+                        "jobs_ahead": idx - 1,
+                    }
+                )
+
+        # Primary position = first of user's jobs in global order (or next free slot)
+        if my_positions:
+            primary = my_positions[0]
+            waiting_number = primary["waiting_number"]
+            jobs_ahead = primary["jobs_ahead"]
+        else:
+            waiting_number = len(global_slots) + 1
+            jobs_ahead = len(global_slots)
+
+        return {
+            "username": username,
+            "user_id": uid,
+            "pending": counts["pending"],
+            "running": counts["running"],
+            "active": counts["active"],
+            "max_jobs": max_jobs,
+            "unlimited": max_jobs == 0,
+            "can_submit": max_jobs == 0 or counts["active"] < max_jobs,
+            "waiting_number": waiting_number,
+            "jobs_ahead": jobs_ahead,
+            "my_jobs": my_positions,
+            "server_queue_length": len(global_slots),
+        }
+
     def user_queue_put(self, item):
         current_user_id = self.get_current_user_id()
         # get_user expects user_id= for UUIDs (JWT sets UUID, not username)
@@ -421,6 +643,43 @@ class AccessControl:
                 },
             )
 
+        max_jobs = self._queue_limit_for_user(current_user_id)
+        # Atomic check + enqueue under the same lock as Comfy's queue
+        with self.__prompt_queue.mutex:
+            counts = self._count_user_jobs_unlocked(current_user_id)
+            if max_jobs > 0 and counts["active"] >= max_jobs:
+                info = {
+                    "error": (
+                        f"Queue limit: you may only have {max_jobs} job(s) "
+                        f"running/waiting at a time. "
+                        f"You currently have {counts['active']} "
+                        f"({counts['running']} running, {counts['pending']} waiting). "
+                        f"Wait until one finishes before submitting another."
+                    ),
+                    "code": "QUEUE_LIMIT",
+                    "active": counts["active"],
+                    "running": counts["running"],
+                    "pending": counts["pending"],
+                    "max_jobs": max_jobs,
+                    "username": username,
+                }
+                print(
+                    f"[Usgromana] Queue LIMIT user={username!r} "
+                    f"active={counts['active']}/{max_jobs}"
+                )
+                raise QueueLimitExceeded(info)
+
+            # Same body as PromptQueue.put (avoid nested mutex deadlock)
+            heapq.heappush(self.__prompt_queue.queue, new_item)
+            try:
+                self.server.queue_updated()
+            except Exception:
+                pass
+            try:
+                self.__prompt_queue.not_empty.notify()
+            except Exception:
+                pass
+
         try:
             get_run_log().log_queued(
                 prompt_id=prompt_id,
@@ -430,14 +689,13 @@ class AccessControl:
                 node_count=node_count,
                 status="queued",
             )
+            status = self.get_user_queue_status(current_user_id)
             print(
                 f"[Usgromana] Queue: user={username!r} workflow={workflow_name!r} "
-                f"prompt_id={prompt_id!r}"
+                f"prompt_id={prompt_id!r} waiting_number={status.get('waiting_number')}"
             )
         except Exception as e:
             print(f"[Usgromana] workflow run log (queue) failed: {e}")
-
-        self.__prompt_queue_put(new_item)
 
     def user_queue_get(self, timeout=None):
         with self.__prompt_queue.not_empty:

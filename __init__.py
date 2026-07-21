@@ -140,9 +140,13 @@ app.middlewares.append(workflow_interceptor_middleware)
 if SEPARATE_USERS:
     app.middlewares.append(access_control.create_folder_access_control_middleware())
     access_control.patch_folder_paths()
-    access_control.patch_prompt_queue()
     install_comfy_user_bridge()
     app.middlewares.append(create_comfy_user_middleware())
+
+# Always patch queue (per-user isolation when SEPARATE_USERS + job limit + run log)
+access_control.patch_prompt_queue()
+# Queue limit + waiting_number on /prompt (after JWT so current user is known)
+app.middlewares.append(access_control.create_queue_limit_middleware())
 
 app.middlewares.append(access_control.create_usgromana_middleware())
 watcher.register(app)

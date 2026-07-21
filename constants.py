@@ -64,3 +64,13 @@ FORCE_HTTPS = config_data.get("force_https", False)
 SEPARATE_USERS = config_data.get("seperate_users", True)
 MANAGER_ADMIN_ONLY = config_data.get("manager_admin_only", True)
 MATCH_HEADERS = {"X-Forwarded-Proto": "https"}
+
+# Per-user concurrent queue cap (pending + running). 0 = unlimited.
+MAX_QUEUE_JOBS_PER_USER = int(config_data.get("max_queue_jobs_per_user", 2) or 0)
+_raw_exempt = config_data.get("queue_limit_exempt_roles", ["admin"])
+if isinstance(_raw_exempt, str):
+    QUEUE_LIMIT_EXEMPT_ROLES = {g.strip().lower() for g in _raw_exempt.split(",") if g.strip()}
+elif isinstance(_raw_exempt, (list, tuple, set)):
+    QUEUE_LIMIT_EXEMPT_ROLES = {str(g).strip().lower() for g in _raw_exempt if str(g).strip()}
+else:
+    QUEUE_LIMIT_EXEMPT_ROLES = {"admin"}

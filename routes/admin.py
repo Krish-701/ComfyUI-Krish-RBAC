@@ -628,3 +628,92 @@ async def api_workflow_runs_clear(request):
         return web.json_response({"status": "ok", "removed": removed})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.get("/usgromana/api/workflow-runs/export")
+async def api_workflow_runs_export(request):
+    """
+    Export run log as CSV or Excel (.xlsx).
+
+    Query:
+      format=csv|xlsx|excel  (default csv)
+      user=  (admin/power filter)
+      q=     (search)
+      status=
+    """
+    username, user_id, admin, role, can_view_all = _caller_identity(request)
+    if not username:
+        return web.json_response({"error": "Authentication required"}, status=401)
+
+    try:
+        from ..utils.workflow_run_log import get_run_log
+        from datetime import datetime, timezone
+
+        q = request.rel_url.query
+        fmt = (q.get("format") or "csv").strip().lower()
+        if fmt in ("excel", "xls"):
+            fmt = "xlsx"
+        search = (q.get("q") or q.get("search") or "").strip() or None
+        status = (q.get("status") or "").strip() or None
+        filter_user = (q.get("user") or "").strip() or None
+        if not can_view_all:
+            filter_user = username
+
+        runs = get_run_log().export_runs(
+            username=filter_user,
+            search=search,
+            status=status,
+        )
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        base_name = f"workflow_run_log_{stamp}"
+
+        if fmt == "xlsx":
+            data = get_run_log().runs_to_xlsx_bytes(runs)
+            return web.Response(
+                body=data,
+                content_type=(
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                ),
+                headers={
+                    "Content-Disposition": f'attachment; filename="{base_name}.xlsx"',
+                },
+            )
+
+        # Default CSV (Excel-friendly UTF-8 BOM)
+        from ..utils.workflow_run_log import WorkflowRunLog
+
+        csv_text = WorkflowRunLog.runs_to_csv(runs)
+        return web.Response(
+            text=csv_text,
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{base_name}.csv"',
+            },
+        )
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.get("/usgromana/api/queue-status")
+async def api_queue_status(request):
+    """
+    Current user's queue occupancy and waiting number.
+    Also returns server queue length.
+    """
+    username, user_id, admin, role, can_view_all = _caller_identity(request)
+    if not username:
+        return web.json_response({"error": "Authentication required"}, status=401)
+
+    try:
+        from ..globals import access_control
+
+        status = access_control.get_user_queue_status(user_id)
+        status["viewer"] = username
+        status["role"] = role
+        status["is_admin"] = admin
+        return web.json_response(status)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)

@@ -277,6 +277,155 @@ class WorkflowRunLog:
             "search": (str(search).strip() if search else None),
         }
 
+    def export_runs(
+        self,
+        *,
+        username: str | None = None,
+        user_id: str | None = None,
+        search: str | None = None,
+        status: str | None = None,
+        limit: int = 50000,
+    ) -> list[dict[str, Any]]:
+        """All matching runs (newest first) for CSV/Excel export."""
+        result = self.list_runs(
+            username=username,
+            user_id=user_id,
+            search=search,
+            status=status,
+            limit=limit,
+            offset=0,
+        )
+        return list(result.get("runs") or [])
+
+    @staticmethod
+    def runs_to_csv(runs: list[dict[str, Any]]) -> str:
+        """Build CSV text (UTF-8 BOM friendly for Excel)."""
+        import csv
+        import io
+
+        fields = [
+            "started_at",
+            "finished_at",
+            "duration_sec",
+            "username",
+            "user_id",
+            "job_id",
+            "prompt_id",
+            "workflow_name",
+            "status",
+            "node_count",
+            "id",
+        ]
+        buf = io.StringIO()
+        # Excel on Windows likes UTF-8 BOM
+        buf.write("\ufeff")
+        writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for r in runs:
+            row = {k: r.get(k, "") for k in fields}
+            if not row.get("job_id"):
+                row["job_id"] = r.get("prompt_id") or ""
+            writer.writerow(row)
+        return buf.getvalue()
+
+    @staticmethod
+    def runs_to_xlsx_bytes(runs: list[dict[str, Any]]) -> bytes:
+        """
+        Build a minimal .xlsx workbook without third-party deps (Office Open XML).
+        """
+        import zipfile
+        import io
+        from xml.sax.saxutils import escape
+
+        fields = [
+            ("started_at", "Started (UTC)"),
+            ("finished_at", "Finished (UTC)"),
+            ("duration_sec", "Duration (sec)"),
+            ("username", "Username"),
+            ("user_id", "User ID"),
+            ("job_id", "Job ID"),
+            ("prompt_id", "Prompt ID"),
+            ("workflow_name", "Workflow"),
+            ("status", "Status"),
+            ("node_count", "Nodes"),
+            ("id", "Log ID"),
+        ]
+
+        def cell_xml(col_idx: int, row_idx: int, value) -> str:
+            # A1-style ref
+            col = ""
+            n = col_idx
+            while n:
+                n, rem = divmod(n - 1, 26)
+                col = chr(65 + rem) + col
+            ref = f"{col}{row_idx}"
+            text = "" if value is None else str(value)
+            # inline string
+            return (
+                f'<c r="{ref}" t="inlineStr"><is><t>{escape(text)}</t></is></c>'
+            )
+
+        rows_xml = []
+        # header
+        header_cells = "".join(
+            cell_xml(i + 1, 1, title) for i, (_, title) in enumerate(fields)
+        )
+        rows_xml.append(f'<row r="1">{header_cells}</row>')
+        for r_i, run in enumerate(runs, start=2):
+            cells = []
+            for c_i, (key, _) in enumerate(fields):
+                val = run.get(key, "")
+                if key == "job_id" and not val:
+                    val = run.get("prompt_id") or ""
+                cells.append(cell_xml(c_i + 1, r_i, val))
+            rows_xml.append(f'<row r="{r_i}">{"".join(cells)}</row>')
+
+        sheet = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f'<sheetData>{"".join(rows_xml)}</sheetData></worksheet>'
+        )
+        workbook = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<sheets><sheet name="Run Log" sheetId="1" r:id="rId1"/></sheets></workbook>'
+        )
+        content_types = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            "</Types>"
+        )
+        rels = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+            'Target="xl/workbook.xml"/></Relationships>'
+        )
+        wb_rels = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+            'Target="worksheets/sheet1.xml"/></Relationships>'
+        )
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", content_types)
+            zf.writestr("_rels/.rels", rels)
+            zf.writestr("xl/workbook.xml", workbook)
+            zf.writestr("xl/_rels/workbook.xml.rels", wb_rels)
+            zf.writestr("xl/worksheets/sheet1.xml", sheet)
+        return buf.getvalue()
+
     def stats(
         self,
         *,

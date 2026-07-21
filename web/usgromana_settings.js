@@ -121,6 +121,7 @@ const UI_DEFAULTS_API_ENDPOINT = "/usgromana/api/ui-defaults";
 const WORKFLOW_RUNS_API = "/usgromana/api/workflow-runs";
 const WORKFLOW_RUNS_STATS_API = "/usgromana/api/workflow-runs/stats";
 const WORKFLOW_RUNS_ACTIVE_API = "/usgromana/api/workflow-runs/active";
+const WORKFLOW_RUNS_EXPORT_API = "/usgromana/api/workflow-runs/export";
 
 // --- 1. BLOCKING MAP (The Enforcer) ---
 // If a user lacks permission for the Key, these CSS selectors are hidden via !important
@@ -1725,8 +1726,10 @@ async renderRunLog(container, usersList) {
                         ${userOptions}
                     </select>
                 </div>` : `<input type="hidden" id="usgromana-runs-user" value="" />`}
-                <div style="display:flex; gap:8px; align-items:flex-end;">
+                <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
                     <button class="usgromana-btn secondary" id="usgromana-runs-refresh">Refresh</button>
+                    <button class="usgromana-btn secondary" id="usgromana-runs-export-csv" title="Download CSV (opens in Excel)">Export CSV</button>
+                    <button class="usgromana-btn secondary" id="usgromana-runs-export-xlsx" title="Download Excel .xlsx">Export Excel</button>
                     ${isAdmin ? `<button class="usgromana-btn danger" id="usgromana-runs-clear">Clear log</button>` : ""}
                 </div>
             </div>
@@ -1766,7 +1769,46 @@ async renderRunLog(container, usersList) {
     const metaEl = container.querySelector("#usgromana-runs-meta");
     const refreshBtn = container.querySelector("#usgromana-runs-refresh");
     const clearBtn = container.querySelector("#usgromana-runs-clear");
+    const exportCsvBtn = container.querySelector("#usgromana-runs-export-csv");
+    const exportXlsxBtn = container.querySelector("#usgromana-runs-export-xlsx");
     const colSpan = canViewAll ? 7 : 6;
+
+    const downloadExport = async (format) => {
+        const filterUser = canViewAll ? (userSelect?.value || "").trim() : "";
+        const search = (searchInput?.value || "").trim();
+        const q = new URLSearchParams();
+        q.set("format", format);
+        if (filterUser) q.set("user", filterUser);
+        if (search) q.set("q", search);
+        try {
+            const res = await fetch(`${WORKFLOW_RUNS_EXPORT_API}?${q}`, {
+                credentials: "include",
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                alert(err.error || `Export failed (${res.status})`);
+                return;
+            }
+            const blob = await res.blob();
+            const cd = res.headers.get("Content-Disposition") || "";
+            const m = /filename="?([^"]+)"?/i.exec(cd);
+            const fname =
+                m?.[1] ||
+                (format === "xlsx"
+                    ? "workflow_run_log.xlsx"
+                    : "workflow_run_log.csv");
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = fname;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+        } catch (e) {
+            console.error("[Usgromana] export failed:", e);
+            alert("Export failed. See console.");
+        }
+    };
 
     const fmtDuration = (sec) => {
         if (sec == null || sec === "") return "—";
@@ -1923,6 +1965,8 @@ async renderRunLog(container, usersList) {
 
     let searchTimer = null;
     refreshBtn.onclick = () => load();
+    if (exportCsvBtn) exportCsvBtn.onclick = () => downloadExport("csv");
+    if (exportXlsxBtn) exportXlsxBtn.onclick = () => downloadExport("xlsx");
     if (userSelect && userSelect.tagName === "SELECT") {
         userSelect.onchange = () => load();
     }
