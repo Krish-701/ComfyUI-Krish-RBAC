@@ -147,6 +147,10 @@ class AccessControl:
         self.__get_input_directory = folder_paths.get_input_directory
         self.__prompt_queue = self.server.prompt_queue
         self.__prompt_queue_put = self.__prompt_queue.put
+        # prompt_ids interrupted by admin/power cancel (for status + cleanup)
+        self._cancelled_prompt_ids: set[str] = set()
+        # task_id -> prompt_id scheduled for forced cleanup if interrupt hangs
+        self._force_clear_tasks: dict = {}
 
     def _load_group_config(self):
         if not os.path.exists(self.groups_config_file):
@@ -669,14 +673,26 @@ class AccessControl:
                 )
                 raise QueueLimitExceeded(info)
 
-            # Same body as PromptQueue.put (avoid nested mutex deadlock)
+            # Same body as PromptQueue.put (avoid nested mutex deadlock).
+            # not_empty is usually a Condition on the same mutex — notify while held.
             heapq.heappush(self.__prompt_queue.queue, new_item)
             try:
                 self.server.queue_updated()
             except Exception:
                 pass
             try:
-                self.__prompt_queue.not_empty.notify()
+                ne = self.__prompt_queue.not_empty
+                if hasattr(ne, "notify"):
+                    ne.notify()
+                elif hasattr(ne, "notify_all"):
+                    ne.notify_all()
+            except RuntimeError:
+                # notify() called without owning the Condition lock on some builds
+                try:
+                    with self.__prompt_queue.not_empty:
+                        self.__prompt_queue.not_empty.notify()
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -769,10 +785,9 @@ class AccessControl:
             workflow_name = meta.get("workflow_name") or "Unnamed workflow"
             was_cancelled = False
             try:
-                cancelled_ids = getattr(self, "_cancelled_prompt_ids", None)
-                if cancelled_ids and str(prompt_id) in cancelled_ids:
+                if str(prompt_id) in self._cancelled_prompt_ids:
                     was_cancelled = True
-                    cancelled_ids.discard(str(prompt_id))
+                    self._cancelled_prompt_ids.discard(str(prompt_id))
             except Exception:
                 pass
             if was_cancelled and isinstance(status_dict, dict):
@@ -919,20 +934,21 @@ class AccessControl:
         return out
 
     def user_queue_wipe_queue(self):
+        """
+        Clear only the current user's pending items.
+
+        IMPORTANT: Do not wipe the global queue for admin/power here — ComfyUI's
+        "Clear Queue" would otherwise delete every user's jobs.
+        """
         with self.__prompt_queue.mutex:
             current_user = self.get_current_user_id()
-            can_view_all = self.current_user_can_view_all()
-            if can_view_all:
-                # Admin/power: clear the entire pending queue
-                self.__prompt_queue.queue = []
-            else:
-                self.__prompt_queue.queue = [
-                    i
-                    for i in self.__prompt_queue.queue
-                    if not (
-                        isinstance(i[-1], dict) and i[-1].get("user_id") == current_user
-                    )
-                ]
+            self.__prompt_queue.queue = [
+                i
+                for i in self.__prompt_queue.queue
+                if not (
+                    isinstance(i[-1], dict) and i[-1].get("user_id") == current_user
+                )
+            ]
             self.server.queue_updated()
 
     def _interrupt_comfy_execution(self) -> None:
@@ -977,6 +993,7 @@ class AccessControl:
         current_user = self.get_current_user_id()
         found = None
         need_interrupt = False
+        force_task_id = None
 
         with self.__prompt_queue.mutex:
             # 1) Pending queue — safe to remove immediately
@@ -1019,11 +1036,9 @@ class AccessControl:
                             "error": "Not allowed to cancel this job",
                             "code": "FORBIDDEN",
                         }
-                    # Track that this prompt was cancelled for status logging
-                    if not hasattr(self, "_cancelled_prompt_ids"):
-                        self._cancelled_prompt_ids = set()
                     self._cancelled_prompt_ids.add(pid)
                     need_interrupt = True
+                    force_task_id = task_id
                     found = {
                         "ok": True,
                         "cancelled": "running",
@@ -1032,7 +1047,7 @@ class AccessControl:
                         "username": meta.get("username")
                         or _resolve_username_for_queue(self.users_db, owner),
                         "workflow_name": meta.get("workflow_name") or "Unnamed workflow",
-                        "note": "Interrupt sent; job will free the queue slot when the worker stops",
+                        "note": "Interrupt sent; slot frees when the worker stops (or after timeout)",
                     }
                     break
 
@@ -1048,11 +1063,14 @@ class AccessControl:
                 self.server.queue_updated()
             except Exception:
                 pass
+            # If the worker never finishes task_done, free the slot so the user can run again
+            if force_task_id is not None:
+                self._schedule_force_clear_running(pid, force_task_id)
 
         try:
             from .workflow_run_log import get_run_log
 
-            # Pending is fully gone now; running will also be marked when task_done fires
+            # Pending is fully gone now; running finishes when task_done or force-clear runs
             get_run_log().update_status(
                 pid,
                 "cancelled",
@@ -1062,6 +1080,51 @@ class AccessControl:
             pass
 
         return found
+
+    def _schedule_force_clear_running(self, prompt_id: str, task_id, delay_sec: float = 25.0):
+        """
+        If interrupt does not complete, remove a stuck currently_running entry so
+        queue limits and later jobs keep working.
+        """
+        import threading
+
+        pid = str(prompt_id)
+
+        def _worker():
+            import time as _time
+
+            _time.sleep(delay_sec)
+            try:
+                with self.__prompt_queue.mutex:
+                    item = self.__prompt_queue.currently_running.get(task_id)
+                    if item is None:
+                        return
+                    meta, body = _usgromana_meta_from_queue_entry(item)
+                    body_pid = body[1] if isinstance(body, tuple) and len(body) > 1 else None
+                    if str(body_pid) != pid:
+                        return
+                    # Still stuck after interrupt — force free
+                    self.__prompt_queue.currently_running.pop(task_id, None)
+                    self._cancelled_prompt_ids.discard(pid)
+                    try:
+                        self.server.queue_updated()
+                    except Exception:
+                        pass
+                try:
+                    from .workflow_run_log import get_run_log
+
+                    get_run_log().update_status(pid, "cancelled", finished=True)
+                except Exception:
+                    pass
+                print(
+                    f"[Usgromana] Force-cleared stuck cancelled job prompt_id={pid!r} "
+                    f"task_id={task_id}"
+                )
+            except Exception as e:
+                print(f"[Usgromana] force-clear failed: {e}")
+
+        t = threading.Thread(target=_worker, name=f"usgromana-force-clear-{pid[:8]}", daemon=True)
+        t.start()
 
     def user_queue_delete_queue_item(self, func):
         def unwrap(entry):

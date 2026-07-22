@@ -212,6 +212,8 @@ class UsersDB:
         user_id, user_data = self.get_user(username)
         if not user_id or not user_data:
             return False
+        if user_data.get("disabled"):
+            return False
 
         return bcrypt.checkpw(
             password.encode("utf-8"), user_data["password"].encode("utf-8")

@@ -209,23 +209,15 @@ async def api_change_password(request: web.Request) -> web.Response:
     new_pw = data.get("new_password") or data.get("password")
     if new_pw is None:
         return web.json_response({"error": "Missing new_password"}, status=400)
+    if not str(current):
+        return web.json_response({"error": "Current password is required"}, status=400)
 
-    # If forced change, still verify they know the temp password unless skip_current
-    must = False
-    _, rec = users_db.get_user(username=username)
-    if rec:
-        must = bool(rec.get("must_change_password"))
-
-    if not must:
-        uid, _ = users_db.authenticate(username, current)
-        if not uid:
-            return web.json_response({"error": "Current password incorrect"}, status=403)
-    else:
-        # Allow change with current temp password
-        if current:
-            uid, auth_rec = users_db.authenticate(username, current)
-            if not uid and not (auth_rec or {}).get("_disabled"):
-                return web.json_response({"error": "Current password incorrect"}, status=403)
+    # Always verify current password (including forced change after admin reset)
+    uid, auth_rec = users_db.authenticate(username, current)
+    if auth_rec and auth_rec.get("_disabled") and not uid:
+        return web.json_response({"error": "Account disabled"}, status=403)
+    if not uid:
+        return web.json_response({"error": "Current password incorrect"}, status=403)
 
     ok = users_db.set_password(username, str(new_pw), force_change=False)
     if not ok:
