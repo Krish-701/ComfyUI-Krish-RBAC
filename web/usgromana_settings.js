@@ -907,7 +907,14 @@ renderUsers(list, container) {
             <div class="usgromana-row" style="gap:8px; flex-wrap:wrap; align-items:center;">
                 <input type="file" id="usgromana-bulk-file" accept=".csv,text/csv,text/plain" />
                 <button class="usgromana-btn secondary" id="usgromana-bulk-import">Import CSV</button>
+                <button class="usgromana-btn secondary" id="usgromana-users-export" title="Download name,email,password,role CSV">
+                    Export Users CSV
+                </button>
             </div>
+            <p style="font-size:12px;opacity:.75;margin:6px 0 0;">
+                Export columns: <code>name,email,password,role</code>.
+                Password is the stored hash (plain passwords cannot be recovered). Use <strong>Reset PW</strong> to set a new password.
+            </p>
             <div style="margin-top:10px;">
                 <label class="usgromana-field-label">Or paste CSV</label>
                 <textarea id="usgromana-bulk-text" class="usgromana-textarea" rows="5"
@@ -1072,6 +1079,36 @@ renderUsers(list, container) {
             if (!bulkFile.files?.length) return;
             const text = await bulkFile.files[0].text();
             if (bulkText) bulkText.value = text;
+        };
+    }
+
+    const exportUsersBtn = container.querySelector("#usgromana-users-export");
+    if (exportUsersBtn) {
+        exportUsersBtn.onclick = async () => {
+            try {
+                const res = await fetch("/usgromana/api/users/export?format=csv", {
+                    credentials: "include",
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    alert(err.error || `Export failed (${res.status})`);
+                    return;
+                }
+                const blob = await res.blob();
+                const cd = res.headers.get("Content-Disposition") || "";
+                const m = /filename="?([^"]+)"?/i.exec(cd);
+                const fname = m?.[1] || "users_export.csv";
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = fname;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+            } catch (e) {
+                console.error("[usgromana] users export failed:", e);
+                alert("Users export failed. See console.");
+            }
         };
     }
 

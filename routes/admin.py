@@ -135,6 +135,71 @@ async def api_users(request):
     return web.json_response({"users": users_list})
 
 
+@routes.get("/usgromana/api/users/export")
+async def api_users_export(request):
+    """
+    Admin-only: export users as CSV.
+
+    Columns: name,email,password,role
+    - name = username
+    - email = login email
+    - password = stored hash if present (plain passwords are never stored; use Reset PW to set new ones)
+    - role = primary group
+
+    Query: format=csv (default)
+    """
+    if not is_admin(request):
+        return web.json_response({"error": "Admin only"}, status=403)
+
+    try:
+        import csv
+        import io
+        from datetime import datetime, timezone
+
+        raw = load_json_file(USERS_FILE, {})
+        data = raw.get("users", raw) if isinstance(raw, dict) else raw
+        if not isinstance(data, dict):
+            data = {}
+
+        # Optional: include password hashes (default true for backup; still not plaintext)
+        include_hash = (request.rel_url.query.get("include_password") or "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+
+        buf = io.StringIO()
+        buf.write("\ufeff")  # Excel-friendly UTF-8 BOM
+        writer = csv.writer(buf)
+        writer.writerow(["name", "email", "password", "role"])
+
+        for uid, u in data.items():
+            if not isinstance(u, dict):
+                continue
+            name = u.get("username") or ""
+            email = u.get("email") or ""
+            groups = u.get("groups") or []
+            if isinstance(groups, str):
+                groups = [groups]
+            role = (groups[0] if groups else ("admin" if u.get("admin") else "user")).lower()
+            # Plaintext passwords cannot be exported — only bcrypt hash exists on disk
+            pw = (u.get("password") or "") if include_hash else ""
+            writer.writerow([name, email, pw, role])
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        csv_text = buf.getvalue()
+        logger.info(f"[Audit] users CSV export by {_admin_username(request)}")
+        return web.Response(
+            text=csv_text,
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="users_export_{stamp}.csv"',
+            },
+        )
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 @routes.post("/usgromana/api/users/bulk")
 async def api_users_bulk_import(request):
     """

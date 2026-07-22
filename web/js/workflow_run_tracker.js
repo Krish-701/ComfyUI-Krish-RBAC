@@ -14,6 +14,9 @@ const QUEUE_STATUS_URL = "/usgromana/api/queue-status";
 let cachedMe = null;
 let statusEl = null;
 let pollTimer = null;
+/** prompt_ids already notified (admin/power live feed) */
+let knownJobKeys = new Set();
+let jobNotifyPrimed = false;
 
 async function fetchMe() {
     try {
@@ -183,6 +186,87 @@ function renderActiveBar(payload, queueStatus) {
     bar.style.display = "block";
 }
 
+function jobKey(r) {
+    return `${r.prompt_id || r.job_id || ""}|${r.username || ""}|${r.status || ""}`;
+}
+
+function canReceiveLiveJobAlerts() {
+    if (!cachedMe) return false;
+    return !!(
+        cachedMe.can_view_all_runs ||
+        cachedMe.is_admin ||
+        cachedMe.role === "admin" ||
+        cachedMe.role === "power"
+    );
+}
+
+/**
+ * Admin / power: toast when any user queues or starts a job (live).
+ */
+function notifyNewJobs(activeList) {
+    if (!canReceiveLiveJobAlerts()) return;
+    const active = Array.isArray(activeList) ? activeList : [];
+    const me = (cachedMe?.username || "").toLowerCase();
+
+    if (!jobNotifyPrimed) {
+        // First poll: seed without spamming toasts for existing jobs
+        for (const r of active) {
+            knownJobKeys.add(jobKey(r));
+            if (r.prompt_id) knownJobKeys.add(`id:${r.prompt_id}`);
+        }
+        jobNotifyPrimed = true;
+        return;
+    }
+
+    for (const r of active) {
+        const key = jobKey(r);
+        const idKey = r.prompt_id ? `id:${r.prompt_id}` : null;
+        const isNew = !knownJobKeys.has(key) && !(idKey && knownJobKeys.has(idKey) && r.status === "queued");
+        // Notify on new prompt_id, or transition to running
+        const isNewId = idKey && !knownJobKeys.has(idKey);
+        const becameRunning =
+            r.status === "running" &&
+            idKey &&
+            knownJobKeys.has(idKey) &&
+            !knownJobKeys.has(key);
+
+        knownJobKeys.add(key);
+        if (idKey) knownJobKeys.add(idKey);
+
+        if (!isNewId && !becameRunning) continue;
+
+        const who = r.username || "user";
+        // Still notify for own jobs if admin/power (they want to see all activity)
+        const wf = r.workflow_name || "Unnamed workflow";
+        const jid = r.job_id || r.prompt_id || "";
+        const jshort =
+            jid && String(jid).length > 14
+                ? String(jid).slice(0, 8) + "…"
+                : jid;
+
+        if (isNewId && r.status === "queued") {
+            showToast(
+                `🔔 Job queued\nUser: ${who}\nWorkflow: ${wf}` +
+                    (jshort ? `\nJob: ${jshort}` : ""),
+                "info"
+            );
+        } else if (becameRunning || (isNewId && r.status === "running")) {
+            showToast(
+                `▶ Job running\nUser: ${who}\nWorkflow: ${wf}` +
+                    (jshort ? `\nJob: ${jshort}` : ""),
+                "info"
+            );
+        }
+    }
+
+    // Cap memory: drop old keys if set grows huge
+    if (knownJobKeys.size > 500) {
+        knownJobKeys = new Set(
+            active.flatMap((r) => [jobKey(r), r.prompt_id ? `id:${r.prompt_id}` : null].filter(Boolean))
+        );
+    }
+}
+
 async function pollActive() {
     try {
         const [activeRes, statusRes] = await Promise.all([
@@ -191,6 +275,7 @@ async function pollActive() {
         ]);
         const data = activeRes.ok ? await activeRes.json() : { active: [] };
         const qStatus = statusRes.ok ? await statusRes.json() : null;
+        notifyNewJobs(data.active || []);
         renderActiveBar(data, qStatus);
     } catch {
         /* ignore */
@@ -200,7 +285,9 @@ async function pollActive() {
 function startPolling() {
     if (pollTimer) return;
     pollActive();
-    pollTimer = setInterval(pollActive, 4000);
+    // Admin/power: faster live feed (~2s). Others: every 4s.
+    const interval = canReceiveLiveJobAlerts() ? 2000 : 4000;
+    pollTimer = setInterval(pollActive, interval);
 }
 
 function tagPromptPayload(body) {

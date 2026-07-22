@@ -73,4 +73,4 @@ if isinstance(_raw_exempt, str):
 elif isinstance(_raw_exempt, (list, tuple, set)):
     QUEUE_LIMIT_EXEMPT_ROLES = {str(g).strip().lower() for g in _raw_exempt if str(g).strip()}
 else:
-    QUEUE_LIMIT_EXEMPT_ROLES = {"admin"}
+    QUEUE_LIMIT_EXEMPT_ROLES = {"admin", "power"}
