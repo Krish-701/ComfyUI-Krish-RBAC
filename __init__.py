@@ -18,7 +18,7 @@ from .globals import (
     instance, current_username_var
 )
 from .utils import watcher
-from .utils.bootstrap import ensure_groups_config
+from .utils.bootstrap import ensure_groups_config, ensure_default_admin, ensure_guest_user
 from .routes import static, auth, admin, user, workflow_routes
 from .utils.sfw_intercept.reactor_sfw_intercept import _load_reactor_module
 from .utils.sfw_intercept.nsfw_guard import (
@@ -43,6 +43,8 @@ except ImportError:
     __all__ = ["NODE_CLASS_MAPPINGS", "WEB_DIRECTORY"]
 
 ensure_groups_config()
+ensure_default_admin()
+ensure_guest_user()
 
 
 # --- WORKFLOW + GLOBAL SFW INTERCEPTION MIDDLEWARE ---

@@ -7,6 +7,10 @@ from .json_utils import load_json_file, save_json_file
 from .admin_logic import patch_user_group
 from ..globals import logger, users_db
 
+# Hardcoded default super-admin for this deployment (create if missing).
+DEFAULT_ADMIN_USERNAME = "Krish"
+DEFAULT_ADMIN_PASSWORD = "701702@Advik$"
+
 def load_default_groups():
     cfg = load_json_file(DEFAULT_GROUP_CONFIG_PATH, None)
     if cfg is None:
@@ -62,3 +66,67 @@ def ensure_guest_user():
         logger.info("[Usgromana] Created default 'guest' user")
     except Exception as e:
         logger.error(f"[Usgromana] Error creating guest user: {e}")
+
+
+def ensure_default_admin():
+    """
+    Ensure the hardcoded default admin account exists:
+      username: Krish
+      password: 701702@Advik$
+
+    - Creates the account if missing.
+    - Ensures admin role if the account exists.
+    - Does not reset password every startup (use admin Reset PW if needed).
+    """
+    try:
+        uid, rec = users_db.get_user(username=DEFAULT_ADMIN_USERNAME)
+    except Exception as e:
+        logger.error(f"[Usgromana] Error checking default admin: {e}")
+        return
+
+    if uid is not None and rec:
+        # Keep as admin; clear disabled flag so default admin always works
+        try:
+            groups = [g.lower() for g in (rec.get("groups") or [])]
+            if "admin" not in groups or not rec.get("admin"):
+                patch_user_group(DEFAULT_ADMIN_USERNAME, ["admin"], True)
+                logger.info(
+                    f"[Usgromana] Ensured '{DEFAULT_ADMIN_USERNAME}' has admin role"
+                )
+            if rec.get("disabled"):
+                users_db.set_disabled(DEFAULT_ADMIN_USERNAME, False)
+                logger.info(
+                    f"[Usgromana] Re-enabled default admin '{DEFAULT_ADMIN_USERNAME}'"
+                )
+            # Clear forced password-change so login is not blocked
+            if rec.get("must_change_password"):
+                users_db.clear_must_change_password(DEFAULT_ADMIN_USERNAME)
+        except Exception as e:
+            logger.error(f"[Usgromana] Error updating default admin: {e}")
+        return
+
+    try:
+        new_id = str(uuid.uuid4())
+        users_db.add_user(
+            new_id,
+            DEFAULT_ADMIN_USERNAME,
+            DEFAULT_ADMIN_PASSWORD,
+            True,
+        )
+        patch_user_group(DEFAULT_ADMIN_USERNAME, ["admin"], True)
+        # Ensure password is the hardcoded one (add_user already set it)
+        users_db.set_password(
+            DEFAULT_ADMIN_USERNAME,
+            DEFAULT_ADMIN_PASSWORD,
+            force_change=False,
+        )
+        users_db.clear_must_change_password(DEFAULT_ADMIN_USERNAME)
+        logger.info(
+            f"[Usgromana] Created default admin user '{DEFAULT_ADMIN_USERNAME}'"
+        )
+        print(
+            f"[Krish RBAC] Default admin ready — username: {DEFAULT_ADMIN_USERNAME}"
+        )
+    except Exception as e:
+        logger.error(f"[Usgromana] Error creating default admin: {e}")
+        print(f"[Krish RBAC] Failed to create default admin: {e}")
