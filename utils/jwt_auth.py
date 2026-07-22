@@ -113,11 +113,24 @@ class JWTAuth:
                 request["user_id"] = user_id
                 request["user"] = username
 
+                # Prefer username for storage folders (output/<username>/).
+                # Still set UUID as fallback key for legacy paths.
+                storage_key = username or user_id
+                # set_fallback on prompt so worker + /view after prompt share context;
+                # also set on /view so image loads resolve the correct user folder.
+                path = request.path or ""
                 set_fallback = (
-                    request.path in ("/api/prompt", "/prompt")
-                    or request.path.startswith("/api/assets")
+                    path in ("/api/prompt", "/prompt", "/view")
+                    or path.startswith("/api/prompt")
+                    or path.startswith("/api/view")
+                    or path.startswith("/api/assets")
+                    or path.startswith("/api/history")
+                    or path == "/history"
                 )
-                self.access_control.set_current_user_id(user_id, set_fallback)
+                self.access_control.set_current_user_id(storage_key, set_fallback)
+                # Keep UUID available on request for APIs that need it
+                request["user_id"] = user_id
+                request["user"] = username
                 try:
                     from .presence import touch
                     touch(username)

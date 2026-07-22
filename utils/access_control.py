@@ -355,69 +355,131 @@ class AccessControl:
         uid = self.get_current_user_id()
         return uid if uid else None
 
-    def get_user_output_directory(self):
-        base = self.__get_output_directory()
-        # Admin/power HTTP media reads use the global tree (subfolder holds user_id).
-        if _global_media_root.get():
+    def storage_folder_name(self, user_key: str | None = None) -> str | None:
+        """
+        Folder name under output/input/temp for a user.
+        Prefer stable **username** (e.g. output/alice/) so paths are readable.
+        Falls back to sanitized UUID / key if username unknown.
+        """
+        import re
+
+        key = user_key if user_key is not None else self._resolved_directory_user_id()
+        if not key:
+            return None
+        name = None
+        try:
+            uid, rec = self.users_db.get_user(user_id=str(key))
+            if not rec:
+                uid, rec = self.users_db.get_user(username=str(key))
+            if rec and rec.get("username"):
+                name = rec.get("username")
+        except Exception:
+            name = None
+        if not name:
+            name = str(key)
+        # Safe filesystem segment (Windows-friendly)
+        safe = re.sub(r"[^A-Za-z0-9_\-\.]", "_", str(name)).strip(" ._")
+        return safe or "user"
+
+    def _user_media_dir(self, base: str, user_key: str | None = None) -> str:
+        folder = self.storage_folder_name(user_key)
+        if not folder:
             return base
-        uid = self._resolved_directory_user_id()
-        if not uid:
-            return base
-        path = os.path.join(base, uid)
+        path = os.path.join(base, folder)
         os.makedirs(path, exist_ok=True)
         return path
+
+    def get_user_output_directory(self):
+        base = self.__get_output_directory()
+        # Admin/power HTTP media reads use the global tree when flagged.
+        if _global_media_root.get():
+            return base
+        return self._user_media_dir(base)
 
     def get_user_temp_directory(self):
         base = self.__get_temp_directory()
         if _global_media_root.get():
             return base
-        uid = self._resolved_directory_user_id()
-        if not uid:
-            return base
-        path = os.path.join(base, uid)
-        os.makedirs(path, exist_ok=True)
-        return path
+        return self._user_media_dir(base)
 
     def get_user_input_directory(self):
         base = self.__get_input_directory()
         if _global_media_root.get():
             return base
-        uid = self._resolved_directory_user_id()
-        if not uid:
-            return base
-        path = os.path.join(base, uid)
-        os.makedirs(path, exist_ok=True)
-        return path
+        return self._user_media_dir(base)
 
     def get_user_storage_prefixes(self, user_id: str | None = None) -> list[str]:
         """Absolute paths for a user's isolated output/input/temp folders."""
-        uid = user_id or self._resolved_directory_user_id()
-        if not uid:
+        key = user_id or self._resolved_directory_user_id()
+        folder = self.storage_folder_name(key)
+        if not folder:
             return []
         prefixes = []
+        # Also include legacy UUID folder if different from username
+        aliases = {folder}
+        if key and str(key) != folder:
+            aliases.add(str(key))
         for base in (
             self.__get_output_directory(),
             self.__get_input_directory(),
             self.__get_temp_directory(),
         ):
-            path = os.path.join(base, uid)
-            os.makedirs(path, exist_ok=True)
-            prefixes.append(os.path.abspath(path))
+            for name in aliases:
+                path = os.path.join(base, name)
+                os.makedirs(path, exist_ok=True)
+                prefixes.append(os.path.abspath(path))
         return prefixes
 
+    @staticmethod
+    def _sanitize_filename_prefix(value: str, folder_name: str | None) -> str:
+        """
+        Force SaveImage (and similar) prefixes to stay relative under the
+        per-user output root. Strips absolute paths / drive letters / '..'.
+        """
+        clean = (value or "ComfyUI").replace("\\", "/")
+        # Drop Windows drive / UNC / absolute roots
+        if ":" in clean:
+            clean = clean.split(":")[-1]
+        clean = clean.lstrip("/")
+        parts = [p for p in clean.split("/") if p and p not in (".", "..")]
+        if not parts:
+            parts = ["ComfyUI"]
+        # Remove accidental nesting of username or output/temp roots
+        skip = {"output", "outputs", "input", "temp", "ComfyUI"}
+        if folder_name:
+            skip.add(folder_name.lower())
+        while parts and parts[0].lower() in {s.lower() for s in skip if s}:
+            # keep "ComfyUI" if it's the only remaining filename stem
+            if len(parts) == 1 and parts[0].lower() == "comfyui":
+                break
+            if parts[0].lower() == "comfyui" and len(parts) > 1:
+                break
+            if folder_name and parts[0].lower() == folder_name.lower():
+                parts = parts[1:]
+                continue
+            if parts[0].lower() in ("output", "outputs", "input", "temp"):
+                parts = parts[1:]
+                continue
+            break
+        return "/".join(parts) if parts else "ComfyUI"
+
     def add_user_specific_folder_paths(self, json_data):
-        user_id = self._resolved_directory_user_id()
-        if not user_id:
+        """
+        On each prompt: force all save paths into the current user's media root.
+        Workflow-specified absolute/other locations are rewritten.
+        """
+        folder = self.storage_folder_name()
+        if not folder:
             return json_data
         if isinstance(json_data, dict):
-            for k, v in json_data.items():
-                if k == "filename_prefix" and isinstance(v, str):
-                    # input/output/temp roots are already per-user; do not nest user_id again.
-                    clean = v.replace("\\", "/").strip("/")
-                    if clean.startswith(f"{user_id}/"):
-                        json_data[k] = clean
-                    else:
-                        json_data[k] = clean
+            for k, v in list(json_data.items()):
+                if k in ("filename_prefix", "output_path", "save_path") and isinstance(v, str):
+                    json_data[k] = self._sanitize_filename_prefix(v, folder)
+                elif k == "subfolder" and isinstance(v, str):
+                    # Keep relative subfolder only; strip user/output escapes
+                    json_data[k] = self._sanitize_filename_prefix(v, folder)
+                    if json_data[k] == "ComfyUI":
+                        json_data[k] = ""
                 else:
                     self.add_user_specific_folder_paths(v)
         elif isinstance(json_data, list):
@@ -634,6 +696,7 @@ class AccessControl:
                 {
                     "user_id": current_user_id,
                     "username": username,
+                    "storage_folder": self.storage_folder_name(username or current_user_id),
                     "workflow_name": workflow_name,
                 },
             )
@@ -643,6 +706,7 @@ class AccessControl:
                 {
                     "user_id": current_user_id,
                     "username": username,
+                    "storage_folder": self.storage_folder_name(username or current_user_id),
                     "workflow_name": workflow_name,
                 },
             )
@@ -731,18 +795,29 @@ class AccessControl:
                 # Critical: bind worker output dirs to the job owner, not the
                 # last HTTP request (admin polling must not steal another user's saves).
                 owner_id = meta.get("user_id")
-                if owner_id:
-                    self.set_current_user_id(owner_id, set_fallback=True)
+                uname = meta.get("username") or _resolve_username_for_queue(
+                    self.users_db, meta.get("user_id")
+                )
+                # Prefer username as storage key so output lands in output/<username>/
+                storage_key = uname if uname and uname != "guest" else owner_id
+                if storage_key:
+                    self.set_current_user_id(storage_key, set_fallback=True)
+                # Ensure folder exists before nodes save
+                try:
+                    out_dir = self.get_user_output_directory()
+                    os.makedirs(out_dir, exist_ok=True)
+                except Exception:
+                    pass
                 prompt_id = body[1] if isinstance(body, tuple) and len(body) > 1 else None
                 if prompt_id:
                     from .workflow_run_log import get_run_log
 
                     get_run_log().update_status(str(prompt_id), "running")
-                uname = meta.get("username") or _resolve_username_for_queue(
-                    self.users_db, meta.get("user_id")
-                )
                 wf = meta.get("workflow_name") or "Unnamed workflow"
-                print(f"[Usgromana] Running: user={uname!r} workflow={wf!r} prompt_id={prompt_id!r}")
+                print(
+                    f"[Usgromana] Running: user={uname!r} out={self.storage_folder_name(storage_key)!r} "
+                    f"workflow={wf!r} prompt_id={prompt_id!r}"
+                )
             except Exception as e:
                 print(f"[Usgromana] workflow run log (start) failed: {e}")
 

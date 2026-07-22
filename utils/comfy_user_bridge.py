@@ -1713,12 +1713,12 @@ def _request_wants_generated_assets(request: web.Request) -> bool:
     return "output" in tags
 
 
-async def _try_serve_cross_user_view(request: web.Request):
+async def _try_serve_user_view(request: web.Request, *, privileged: bool = False):
     """
-    Serve /view images from any user's output/temp folder for admin/power.
+    Serve /view images from per-user output/temp folders.
 
-    Comfy saves into output/<user_id>/filename with empty subfolder. Privileged
-    viewers use a different chroot, so native /view 404s — resolve across users.
+    Files live under output/<username>/ (and legacy output/<uuid>/).
+    Comfy's chroot view often 404s — resolve via media_paths (and full scan if privileged).
     """
     from .media_paths import resolve_output_file_path, global_temp_directory
 
@@ -1732,8 +1732,7 @@ async def _try_serve_cross_user_view(request: web.Request):
     path = None
     if img_type == "output":
         path = resolve_output_file_path(filename, subfolder)
-        if not path:
-            # Brute-search first-level user dirs under global output
+        if not path and privileged:
             base = global_output_directory()
             name = filename.replace("\\", "/").split("/")[-1]
             sub = subfolder.replace("\\", "/").strip("/")
@@ -1742,12 +1741,11 @@ async def _try_serve_cross_user_view(request: web.Request):
                     root = os.path.join(base, entry)
                     if not os.path.isdir(root):
                         continue
-                    candidates = [
+                    for c in (
                         os.path.join(root, name),
                         os.path.join(root, sub, name) if sub else "",
                         os.path.join(base, sub, name) if sub else "",
-                    ]
-                    for c in candidates:
+                    ):
                         if c and os.path.isfile(c):
                             path = c
                             break
@@ -1759,25 +1757,34 @@ async def _try_serve_cross_user_view(request: web.Request):
         base = global_temp_directory()
         name = filename.replace("\\", "/").split("/")[-1]
         sub = subfolder.replace("\\", "/").strip("/")
-        for c in (
-            os.path.join(base, sub, name) if sub else "",
-            os.path.join(base, name),
-        ):
-            if c and os.path.isfile(c):
-                path = c
+        folder_names = set()
+        try:
+            uid = access_control.get_current_user_id()
+            if uid:
+                folder_names.add(access_control.storage_folder_name(uid) or "")
+                folder_names.add(str(uid))
+        except Exception:
+            pass
+        for folder in folder_names:
+            if not folder:
+                continue
+            for c in (
+                os.path.join(base, folder, sub, name) if sub else "",
+                os.path.join(base, folder, name),
+            ):
+                if c and os.path.isfile(c):
+                    path = c
+                    break
+            if path:
                 break
         if not path:
-            try:
-                for entry in os.listdir(base):
-                    root = os.path.join(base, entry)
-                    if not os.path.isdir(root):
-                        continue
-                    c = os.path.join(root, name)
-                    if os.path.isfile(c):
-                        path = c
-                        break
-            except OSError:
-                pass
+            for c in (
+                os.path.join(base, sub, name) if sub else "",
+                os.path.join(base, name),
+            ):
+                if c and os.path.isfile(c):
+                    path = c
+                    break
 
     if not path or not os.path.isfile(path):
         return None
@@ -1898,18 +1905,18 @@ def create_comfy_user_middleware():
                 elif user_id:
                     _sync_output_index_if_needed(user_id, force=False)
 
-        # Privileged /view: if Comfy would miss per-user files, serve from any user folder.
-        if (
-            can_view_all
-            and request.method == "GET"
-            and (path == "/view" or path.rstrip("/").startswith("/api/view"))
+        # /view: resolve output/<username>/ (and legacy uuid) so user previews load
+        if request.method == "GET" and (
+            path == "/view" or path.rstrip("/").startswith("/api/view")
         ):
             try:
-                served = await _try_serve_cross_user_view(request)
+                served = await _try_serve_user_view(
+                    request, privileged=can_view_all
+                )
                 if served is not None:
                     return served
             except Exception as e:
-                _log.debug("cross-user view serve skipped: %s", e)
+                _log.debug("user view serve skipped: %s", e)
 
         with global_media_cm:
             response = await handler(request)
