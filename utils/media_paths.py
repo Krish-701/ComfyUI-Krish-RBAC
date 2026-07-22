@@ -26,20 +26,29 @@ def global_temp_directory() -> str:
     return os.path.abspath(access_control._AccessControl__get_temp_directory())
 
 
-def resolve_output_file_path(
+def _resolve_under_media_root(
+    base: str,
     filename: str | None,
     subfolder: str | None = None,
+    *,
+    search_all_users: bool | None = None,
 ) -> str | None:
     """
-    Find an output image on disk. Tries global output/ first (gallery, assets DB paths),
-    then per-user output/<user_id>/ when a user context is set.
+    Resolve a file under a media root (output/ or temp/) with per-user subfolders.
+
+    Layout:
+      base/<username>/file.png
+      base/<uuid>/file.png   (legacy)
+      base/file.png          (legacy flat)
     """
     if not filename:
         return None
 
-    base = global_output_directory()
     sub = (subfolder or "").replace("\\", "/").strip("/")
     name = filename.replace("\\", "/").strip("/")
+    # Security: no path traversal
+    if ".." in name.split("/") or (sub and ".." in sub.split("/")):
+        return None
 
     candidates: list[str] = []
     if sub:
@@ -47,35 +56,36 @@ def resolve_output_file_path(
     candidates.append(os.path.join(base, name))
 
     uid = access_control.get_current_user_id()
-    # Username folder + legacy UUID folder
-    folder_names = set()
+    folder_names: set[str] = set()
     if uid:
         try:
-            folder_names.add(access_control.storage_folder_name(uid))
+            fn = access_control.storage_folder_name(uid)
+            if fn:
+                folder_names.add(fn)
         except Exception:
             pass
         folder_names.add(str(uid))
+
     for folder in folder_names:
         if not folder:
             continue
         candidates.append(os.path.join(base, folder, name))
-        if sub and sub.split("/")[0] != folder:
-            candidates.append(os.path.join(base, folder, sub, name))
         if sub:
             candidates.append(os.path.join(base, folder, sub, name))
 
-    # Always search first-level user folders for the current user (and all if privileged)
-    search_all = access_control.current_user_can_view_all()
+    if search_all_users is None:
+        search_all_users = access_control.current_user_can_view_all()
+
     try:
         for entry in os.listdir(base):
             user_root = os.path.join(base, entry)
             if not os.path.isdir(user_root):
                 continue
-            if not search_all and folder_names and entry not in folder_names:
+            if not search_all_users and folder_names and entry not in folder_names:
                 continue
+            candidates.append(os.path.join(user_root, name))
             if sub:
                 candidates.append(os.path.join(user_root, sub, name))
-            candidates.append(os.path.join(user_root, name))
             if sub and sub.split("/")[0] == entry:
                 candidates.append(os.path.join(base, sub, name))
     except OSError:
@@ -87,9 +97,34 @@ def resolve_output_file_path(
         if norm in seen:
             continue
         seen.add(norm)
+        if not _is_under(norm, base):
+            continue
         if os.path.isfile(norm):
             return norm
     return None
+
+
+def resolve_output_file_path(
+    filename: str | None,
+    subfolder: str | None = None,
+) -> str | None:
+    """Find an output image under global output/ + per-user subfolders."""
+    return _resolve_under_media_root(
+        global_output_directory(), filename, subfolder
+    )
+
+
+def resolve_temp_file_path(
+    filename: str | None,
+    subfolder: str | None = None,
+) -> str | None:
+    """
+    Find a preview/temp image under global temp/ + per-user subfolders.
+    Admin/power see all users' temp previews.
+    """
+    return _resolve_under_media_root(
+        global_temp_directory(), filename, subfolder
+    )
 
 
 def _is_under(path: str, base: str) -> bool:

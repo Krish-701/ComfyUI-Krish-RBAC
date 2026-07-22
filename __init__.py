@@ -95,14 +95,11 @@ async def workflow_interceptor_middleware(request, handler):
             if img_path and should_block_image_for_current_user(img_path):
                 return web.Response(status=403, text="NSFW Blocked")
         elif filename and img_type == "temp":
-            from .utils.media_paths import global_temp_directory
+            from .utils.media_paths import resolve_temp_file_path
 
-            img_path = os.path.normpath(
-                os.path.join(global_temp_directory(), subfolder, filename)
-                if subfolder
-                else os.path.join(global_temp_directory(), filename)
-            )
-            if os.path.isfile(img_path) and should_block_image_for_current_user(img_path):
+            # Resolve under temp/<username>/ (same as output isolation)
+            img_path = resolve_temp_file_path(filename, subfolder)
+            if img_path and should_block_image_for_current_user(img_path):
                 return web.Response(status=403, text="NSFW Blocked")
 
     # --- Case B: /static_gallery ---

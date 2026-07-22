@@ -1715,12 +1715,14 @@ def _request_wants_generated_assets(request: web.Request) -> bool:
 
 async def _try_serve_user_view(request: web.Request, *, privileged: bool = False):
     """
-    Serve /view images from per-user output/temp folders.
+    Serve /view images from per-user output/ AND temp folders.
 
-    Files live under output/<username>/ (and legacy output/<uuid>/).
-    Comfy's chroot view often 404s — resolve via media_paths (and full scan if privileged).
+    Layout:
+      output/<username>/...
+      temp/<username>/...   (PreviewImage etc.)
+    Admin/power scan all user subfolders for both types.
     """
-    from .media_paths import resolve_output_file_path, global_temp_directory
+    from .media_paths import resolve_output_file_path, resolve_temp_file_path
 
     q = request.rel_url.query
     filename = q.get("filename") or q.get("file") or q.get("name")
@@ -1732,59 +1734,14 @@ async def _try_serve_user_view(request: web.Request, *, privileged: bool = False
     path = None
     if img_type == "output":
         path = resolve_output_file_path(filename, subfolder)
-        if not path and privileged:
-            base = global_output_directory()
-            name = filename.replace("\\", "/").split("/")[-1]
-            sub = subfolder.replace("\\", "/").strip("/")
-            try:
-                for entry in os.listdir(base):
-                    root = os.path.join(base, entry)
-                    if not os.path.isdir(root):
-                        continue
-                    for c in (
-                        os.path.join(root, name),
-                        os.path.join(root, sub, name) if sub else "",
-                        os.path.join(base, sub, name) if sub else "",
-                    ):
-                        if c and os.path.isfile(c):
-                            path = c
-                            break
-                    if path:
-                        break
-            except OSError:
-                pass
     elif img_type == "temp":
-        base = global_temp_directory()
-        name = filename.replace("\\", "/").split("/")[-1]
-        sub = subfolder.replace("\\", "/").strip("/")
-        folder_names = set()
-        try:
-            uid = access_control.get_current_user_id()
-            if uid:
-                folder_names.add(access_control.storage_folder_name(uid) or "")
-                folder_names.add(str(uid))
-        except Exception:
-            pass
-        for folder in folder_names:
-            if not folder:
-                continue
-            for c in (
-                os.path.join(base, folder, sub, name) if sub else "",
-                os.path.join(base, folder, name),
-            ):
-                if c and os.path.isfile(c):
-                    path = c
-                    break
-            if path:
-                break
-        if not path:
-            for c in (
-                os.path.join(base, sub, name) if sub else "",
-                os.path.join(base, name),
-            ):
-                if c and os.path.isfile(c):
-                    path = c
-                    break
+        # Critical: previews save under temp/<username>/ — admin must search all users
+        path = resolve_temp_file_path(filename, subfolder)
+    else:
+        # Unknown type: try both
+        path = resolve_output_file_path(filename, subfolder) or resolve_temp_file_path(
+            filename, subfolder
+        )
 
     if not path or not os.path.isfile(path):
         return None

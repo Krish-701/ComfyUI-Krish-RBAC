@@ -126,6 +126,8 @@ class JWTAuth:
                     or path.startswith("/api/assets")
                     or path.startswith("/api/history")
                     or path == "/history"
+                    # Previews use type=temp — keep user context for temp chroot
+                    or "filename=" in (request.query_string or "")
                 )
                 self.access_control.set_current_user_id(storage_key, set_fallback)
                 # Keep UUID available on request for APIs that need it
