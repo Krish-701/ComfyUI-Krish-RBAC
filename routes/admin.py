@@ -336,8 +336,9 @@ async def api_update_user_route(request):
 async def api_reset_user_password(request):
     """
     Admin-only: set / reset a user's password.
-    Body: { "password": "...", "force_change": true }
-    force_change (default true): user must change password after next login.
+    Body: { "password": "...", "force_change": false }
+    force_change defaults to false so the user can log in with the shared password
+    without being forced to pick a new one.
     """
     if not is_admin(request):
         return web.json_response({"error": "Admin only"}, status=403)
@@ -362,7 +363,8 @@ async def api_reset_user_password(request):
     if not isinstance(new_password, str):
         new_password = str(new_password)
 
-    force_change = data.get("force_change", True)
+    # Default false: share password with user; they log in as-is
+    force_change = data.get("force_change", False)
     if isinstance(force_change, str):
         force_change = force_change.strip().lower() in ("1", "true", "yes")
 
@@ -373,6 +375,12 @@ async def api_reset_user_password(request):
     ok = users_db.set_password(target, new_password, force_change=bool(force_change))
     if not ok:
         return web.json_response({"error": "Failed to update password"}, status=500)
+    # Always clear must_change when force_change is false (covers prior forced flags)
+    if not force_change:
+        try:
+            users_db.clear_must_change_password(target)
+        except Exception:
+            pass
 
     actor = _admin_username(request)
     logger.info(f"[Audit] password reset: target={target} by {actor}")

@@ -1180,24 +1180,19 @@ renderUsers(list, container) {
         };
     });
 
-    // --- Reset password (force change on next login by default) ---
+    // --- Reset password: one prompt only; user can login with this password as-is ---
     container.querySelectorAll(".btn-reset-pw").forEach(btn => {
         btn.onclick = async () => {
             const u = btn.dataset.user;
             const pw = window.prompt(
-                `Reset password for "${u}"\n\nEnter a new temporary password:`
+                `Reset password for "${u}"\n\nEnter the new password to share with them:`
             );
             if (pw === null) return;
             const password = String(pw);
-            const confirmPw = window.prompt(`Confirm new password for "${u}":`);
-            if (confirmPw === null) return;
-            if (String(confirmPw) !== password) {
-                window.alert("Passwords do not match.");
+            if (!password) {
+                window.alert("Password cannot be empty.");
                 return;
             }
-            const force = window.confirm(
-                "Force user to change this password on next login?\n\nOK = yes (recommended)\nCancel = no"
-            );
 
             btn.disabled = true;
             const originalText = btn.innerText;
@@ -1209,7 +1204,8 @@ renderUsers(list, container) {
                         method: "PUT",
                         credentials: "include",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ password, force_change: force }),
+                        // force_change: false — user keeps this password, no forced change on login
+                        body: JSON.stringify({ password, force_change: false }),
                     }
                 );
                 const data = await res.json().catch(() => ({}));
@@ -1221,7 +1217,7 @@ renderUsers(list, container) {
                 }
                 window.alert(
                     (data.message || `Password updated for ${u}.`) +
-                    (force ? "\nThey must change it on next login." : "")
+                    "\nShare this password with them — they can log in directly."
                 );
                 const usersData = await getData("/usgromana/api/users");
                 self.renderUsers(usersData?.users || [], container);
