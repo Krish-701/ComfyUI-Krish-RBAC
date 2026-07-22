@@ -2,6 +2,7 @@ import bcrypt
 import json
 import os
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .json_utils import save_json_file
@@ -148,6 +149,7 @@ class UsersDB:
             "password": self.hash_password(password),
             "admin": bool(admin),
             "groups": groups,
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         if email:
             user["email"] = str(email).strip().lower()

@@ -133,6 +133,7 @@ async def api_users(request):
             "sfw_check": u.get("sfw_check", True),
             "disabled": bool(u.get("disabled")),
             "must_change_password": bool(u.get("must_change_password")),
+            "created_at": u.get("created_at") or "",
         })
     return web.json_response({"users": users_list})
 

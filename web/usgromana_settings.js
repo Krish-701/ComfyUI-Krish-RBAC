@@ -482,6 +482,65 @@ const ADMIN_STYLES = `
     background: rgba(59,130,246,0.20);
 }
 
+/* Users list — compact table */
+.usgromana-users-table {
+    width: 100%;
+    min-width: 720px;
+}
+.usgromana-users-table th,
+.usgromana-users-table td {
+    padding: 8px 10px;
+    white-space: nowrap;
+}
+.usgromana-users-table th.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+.usgromana-users-table th.sortable:hover {
+    color: #93c5fd;
+}
+.usgromana-users-table .col-num { width: 40px; text-align: center; opacity: 0.7; }
+.usgromana-users-table .col-name { min-width: 110px; font-weight: 600; }
+.usgromana-users-table .col-user { min-width: 160px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.usgromana-users-table .col-role { min-width: 100px; }
+.usgromana-users-table .col-sfw { width: 56px; text-align: center; }
+.usgromana-users-table .col-created { min-width: 110px; font-size: 12px; opacity: 0.9; }
+.usgromana-users-table .col-actions { min-width: 220px; white-space: nowrap; }
+.usgromana-users-table .usgromana-btn {
+    padding: 4px 10px;
+    font-size: 11px;
+    margin-right: 4px;
+    margin-bottom: 2px;
+}
+.usgromana-users-table .usgromana-select {
+    min-width: 90px;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+.usgromana-users-table tr.is-disabled td {
+    opacity: 0.55;
+}
+.usgromana-users-wrap {
+    overflow-x: auto;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    background: rgba(0,0,0,0.12);
+}
+.usgromana-users-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.usgromana-users-sort {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+}
+
 /* Table Sections */
 .usgromana-section-row td {
     background: #151821;
@@ -919,24 +978,61 @@ class usgromanaDialog extends ComfyDialog {
         console.log("[Usgromana] usgromanaDialog exposed to window.usgromanaDialog");
     }
 
-renderUsers(list, container) {
+renderUsers(list, container, opts = {}) {
     const currentName = currentUser?.username || null;
     const self = this;
-    const users = Array.isArray(list) ? list : [];
+    const usersRaw = Array.isArray(list) ? list.slice() : [];
+    // sort: name_az (default) | name_za | created_new | created_old
+    let sortMode = opts.sortMode || container._usgromanaUsersSort || "name_az";
+    container._usgromanaUsersSort = sortMode;
 
-    const roleBadge = (grp) => {
-        const colors = {
-            admin: "#ff6b6b",
-            power: "#6eb6ff",
-            user: "#3dd68c",
-            guest: "#888",
-        };
-        const c = colors[grp] || "#aaa";
-        return `<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;background:${c}22;color:${c};border:1px solid ${c}55;">${escapeHtml((grp || "user").toUpperCase())}</span>`;
+    const formatCreated = (iso) => {
+        if (!iso) return "—";
+        try {
+            const d = new Date(iso);
+            if (Number.isNaN(d.getTime())) return String(iso).slice(0, 10);
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, "0");
+            const day = String(d.getDate()).padStart(2, "0");
+            const hh = String(d.getHours()).padStart(2, "0");
+            const mm = String(d.getMinutes()).padStart(2, "0");
+            return `${y}-${m}-${day} ${hh}:${mm}`;
+        } catch {
+            return "—";
+        }
     };
 
-    let cards = users
-        .map((u) => {
+    const sortUsers = (arr, mode) => {
+        const out = arr.slice();
+        const nameKey = (u) => String(u.username || "").toLowerCase();
+        const createdKey = (u) => {
+            const t = Date.parse(u.created_at || "");
+            return Number.isNaN(t) ? 0 : t;
+        };
+        if (mode === "name_za") {
+            out.sort((a, b) => nameKey(b).localeCompare(nameKey(a)));
+        } else if (mode === "created_new") {
+            out.sort((a, b) => createdKey(b) - createdKey(a) || nameKey(a).localeCompare(nameKey(b)));
+        } else if (mode === "created_old") {
+            out.sort((a, b) => createdKey(a) - createdKey(b) || nameKey(a).localeCompare(nameKey(b)));
+        } else {
+            // name_az
+            out.sort((a, b) => nameKey(a).localeCompare(nameKey(b)));
+        }
+        return out;
+    };
+
+    const users = sortUsers(usersRaw, sortMode);
+
+    const sortLabel = {
+        name_az: "Name A → Z",
+        name_za: "Name Z → A",
+        created_new: "Last created (newest)",
+        created_old: "Last created (oldest)",
+    };
+
+    let rows = users
+        .map((u, idx) => {
             const grp = u.groups && u.groups.length ? u.groups[0] : "user";
             const uname = u.username || "unknown";
             const email = u.email || "";
@@ -945,73 +1041,75 @@ renderUsers(list, container) {
             const sfwEnabled = u.sfw_check !== false;
             const isDisabled = !!u.disabled;
             const mustPw = !!u.must_change_password;
+            const created = formatCreated(u.created_at);
+
+            const flags = [
+                isSelf ? '<span style="font-size:10px;opacity:.6;">you</span>' : "",
+                isDisabled ? '<span style="color:#ff6b6b;font-size:10px;">disabled</span>' : "",
+                mustPw ? '<span style="color:#e0c35a;font-size:10px;">must PW</span>' : "",
+            ]
+                .filter(Boolean)
+                .join(" ");
+
+            const actions = [
+                `<button class="usgromana-btn btn-save" data-user="${escapeHtml(uname)}">Save</button>`,
+                !isGuest
+                    ? `<button class="usgromana-btn secondary btn-reset-pw" data-user="${escapeHtml(uname)}">Reset PW</button>`
+                    : "",
+                !isSelf && !isGuest
+                    ? `<button class="usgromana-btn secondary btn-disable" data-user="${escapeHtml(uname)}" data-disabled="${isDisabled ? "1" : "0"}">${isDisabled ? "Enable" : "Disable"}</button>
+                       <button class="usgromana-btn usgromana-btn-danger btn-delete" data-user="${escapeHtml(uname)}">Delete</button>`
+                    : "",
+            ]
+                .filter(Boolean)
+                .join("");
 
             return `
-            <div class="usgromana-user-card" data-user="${escapeHtml(uname)}" style="
-                border:1px solid rgba(255,255,255,0.1);
-                border-radius:12px;
-                padding:14px 16px;
-                background:rgba(0,0,0,0.18);
-                display:flex;
-                flex-direction:column;
-                gap:10px;
-                ${isDisabled ? "opacity:0.55;" : ""}
-            ">
-                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
-                    <div>
-                        <div style="font-size:15px;font-weight:700;">${escapeHtml(uname)}
-                            ${isSelf ? '<span style="font-size:11px;opacity:.6;">(you)</span>' : ""}
-                        </div>
-                        <div style="font-size:12px;opacity:.75;margin-top:2px;">${email ? escapeHtml(email) : "No email"}</div>
-                        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-                            ${roleBadge(grp)}
-                            ${isDisabled ? '<span style="color:#ff6b6b;font-size:11px;">Disabled</span>' : ""}
-                            ${mustPw ? '<span style="color:#e0c35a;font-size:11px;">Must change PW</span>' : ""}
-                        </div>
-                    </div>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
-                        <input type="checkbox" class="usgromana-sfw-toggle" data-user="${escapeHtml(uname)}" ${sfwEnabled ? "checked" : ""} />
-                        SFW
-                    </label>
-                </div>
-                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-                    <label style="font-size:11px;opacity:.7;">Role</label>
-                    <select class="usgromana-role-select usgromana-select" data-user="${escapeHtml(uname)}" style="min-width:120px;padding:6px 10px;">
+            <tr class="${isDisabled ? "is-disabled" : ""}" data-user="${escapeHtml(uname)}">
+                <td class="col-num">${idx + 1}</td>
+                <td class="col-name">
+                    ${escapeHtml(uname)}
+                    ${flags ? `<div style="margin-top:2px;">${flags}</div>` : ""}
+                </td>
+                <td class="col-user" title="${escapeHtml(email || "")}">${email ? escapeHtml(email) : '<span style="opacity:.5;">—</span>'}</td>
+                <td class="col-role">
+                    <select class="usgromana-role-select usgromana-select" data-user="${escapeHtml(uname)}" title="${escapeHtml(grp)}">
                         ${GROUPS.map(
                             (g) =>
                                 `<option value="${g}" ${g === grp ? "selected" : ""}>${g.toUpperCase()}</option>`
                         ).join("")}
                     </select>
-                    <div style="flex:1"></div>
-                    <button class="usgromana-btn btn-save" data-user="${escapeHtml(uname)}">Save</button>
-                    ${
-                        !isGuest
-                            ? `<button class="usgromana-btn secondary btn-reset-pw" data-user="${escapeHtml(uname)}">Reset PW</button>`
-                            : ""
-                    }
-                    ${
-                        !isSelf && !isGuest
-                            ? `<button class="usgromana-btn secondary btn-disable" data-user="${escapeHtml(uname)}" data-disabled="${isDisabled ? "1" : "0"}">${isDisabled ? "Enable" : "Disable"}</button>
-                       <button class="usgromana-btn usgromana-btn-danger btn-delete" data-user="${escapeHtml(uname)}">Delete</button>`
-                            : ""
-                    }
-                </div>
-            </div>`;
+                </td>
+                <td class="col-sfw">
+                    <input type="checkbox" class="usgromana-sfw-toggle" data-user="${escapeHtml(uname)}" ${sfwEnabled ? "checked" : ""} title="SFW check" />
+                </td>
+                <td class="col-created" title="${escapeHtml(u.created_at || "")}">${escapeHtml(created)}</td>
+                <td class="col-actions">${actions}</td>
+            </tr>`;
         })
         .join("");
 
-    if (!cards) {
-        cards = `<div style="opacity:.7;padding:20px;text-align:center;">No users found.</div>`;
+    if (!rows) {
+        rows = `<tr><td colspan="7" style="opacity:.7;padding:20px;text-align:center;">No users found.</td></tr>`;
     }
 
     container.innerHTML = `
         <div class="usgromana-section">
-            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+            <div class="usgromana-users-toolbar">
                 <div>
                     <h3 style="margin:0;">Users &amp; Roles</h3>
                     <p style="margin:4px 0 0;font-size:12px;opacity:.75;">${users.length} account(s) · shared templates: <code>custom_nodes/Templates</code></p>
                 </div>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                    <div class="usgromana-users-sort">
+                        <label for="usgromana-users-sort" style="opacity:.75;">Sort</label>
+                        <select id="usgromana-users-sort" class="usgromana-select" style="padding:5px 10px;font-size:12px;">
+                            <option value="name_az" ${sortMode === "name_az" ? "selected" : ""}>Name A → Z</option>
+                            <option value="name_za" ${sortMode === "name_za" ? "selected" : ""}>Name Z → A</option>
+                            <option value="created_new" ${sortMode === "created_new" ? "selected" : ""}>Last created (newest)</option>
+                            <option value="created_old" ${sortMode === "created_old" ? "selected" : ""}>Last created (oldest)</option>
+                        </select>
+                    </div>
                     <button class="usgromana-btn secondary" id="usgromana-users-export">Export CSV</button>
                     <button class="usgromana-btn secondary" id="usgromana-bulk-toggle">Bulk import ▾</button>
                 </div>
@@ -1032,11 +1130,47 @@ renderUsers(list, container) {
                 <pre id="usgromana-bulk-result" style="margin-top:8px;max-height:140px;overflow:auto;font-size:11px;display:none;background:rgba(0,0,0,.25);padding:8px;border-radius:8px;"></pre>
             </div>
 
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;">
-                ${cards}
+            <div class="usgromana-users-wrap">
+                <table class="usgromana-table usgromana-users-table">
+                    <thead>
+                        <tr>
+                            <th class="col-num">#</th>
+                            <th class="col-name sortable" data-sort="name" title="Sort by name">${sortMode === "name_za" ? "Name ↓" : "Name ↑"}</th>
+                            <th class="col-user">User (email)</th>
+                            <th class="col-role">Role</th>
+                            <th class="col-sfw">SFW</th>
+                            <th class="col-created sortable" data-sort="created" title="Sort by last created">${sortMode === "created_old" ? "Last create ↑" : sortMode === "created_new" ? "Last create ↓" : "Last create"}</th>
+                            <th class="col-actions">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows}
+                    </tbody>
+                </table>
             </div>
+            <p style="margin:8px 0 0;font-size:11px;opacity:.6;">Sorted by: ${escapeHtml(sortLabel[sortMode] || sortMode)} · Click Name / Last create headers to toggle sort</p>
         </div>
     `;
+
+    // --- Sort controls ---
+    const sortSelect = container.querySelector("#usgromana-users-sort");
+    if (sortSelect) {
+        sortSelect.onchange = () => {
+            self.renderUsers(usersRaw, container, { sortMode: sortSelect.value });
+        };
+    }
+    container.querySelectorAll("th.sortable").forEach((th) => {
+        th.onclick = () => {
+            const kind = th.dataset.sort;
+            let next = sortMode;
+            if (kind === "name") {
+                next = sortMode === "name_az" ? "name_za" : "name_az";
+            } else if (kind === "created") {
+                next = sortMode === "created_new" ? "created_old" : "created_new";
+            }
+            self.renderUsers(usersRaw, container, { sortMode: next });
+        };
+    });
 
     const bulkToggle = container.querySelector("#usgromana-bulk-toggle");
     const bulkPanel = container.querySelector("#usgromana-bulk-panel");
@@ -1089,13 +1223,12 @@ renderUsers(list, container) {
                 null,
                 2
             );
-            // Brief summary before table refresh so the result is not lost silently
             window.alert(
                 `Bulk import finished.\n${summary}\n\n` +
                 `Created users login with their email address.`
             );
             const usersData = await getData("/usgromana/api/users");
-            self.renderUsers(usersData?.users || [], container);
+            self.renderUsers(usersData?.users || [], container, { sortMode });
         } catch (e) {
             console.error("[usgromana] bulk import failed:", e);
             bulkStatus.textContent = "Import failed. See console.";
@@ -1105,7 +1238,6 @@ renderUsers(list, container) {
 
     if (bulkBtn) {
         bulkBtn.onclick = async () => {
-            // Prefer file if selected
             if (bulkFile?.files?.length) {
                 const file = bulkFile.files[0];
                 const text = await file.text();
@@ -1162,7 +1294,7 @@ renderUsers(list, container) {
             const sfwCheckbox = container.querySelector(`.usgromana-sfw-toggle[data-user="${u}"]`);
             const sfw = sfwCheckbox ? sfwCheckbox.checked : true;
 
-            btn.innerText = "Saving...";
+            btn.innerText = "Saving…";
             try {
                 await api.fetchApi(`/usgromana/api/users/${u}`, {
                     method: "PUT",
@@ -1176,7 +1308,7 @@ renderUsers(list, container) {
                 console.error("[usgromana] Failed to update user:", e);
                 btn.innerText = "Error";
             }
-            setTimeout(() => (btn.innerText = "Save Changes"), 1000);
+            setTimeout(() => (btn.innerText = "Save"), 1000);
         };
     });
 
@@ -1204,7 +1336,6 @@ renderUsers(list, container) {
                         method: "PUT",
                         credentials: "include",
                         headers: { "Content-Type": "application/json" },
-                        // force_change: false — user keeps this password, no forced change on login
                         body: JSON.stringify({ password, force_change: false }),
                     }
                 );
@@ -1220,7 +1351,7 @@ renderUsers(list, container) {
                     "\nShare this password with them — they can log in directly."
                 );
                 const usersData = await getData("/usgromana/api/users");
-                self.renderUsers(usersData?.users || [], container);
+                self.renderUsers(usersData?.users || [], container, { sortMode });
             } catch (e) {
                 console.error("[usgromana] password reset failed:", e);
                 window.alert("Unexpected error while resetting password.");
@@ -1255,7 +1386,7 @@ renderUsers(list, container) {
                     return;
                 }
                 const usersData = await getData("/usgromana/api/users");
-                self.renderUsers(usersData?.users || [], container);
+                self.renderUsers(usersData?.users || [], container, { sortMode });
             } catch (e) {
                 console.error("[usgromana] disable failed:", e);
                 alert("Failed to update account status.");
@@ -1263,7 +1394,7 @@ renderUsers(list, container) {
         };
     });
 
-    // --- Delete handler per user (unchanged logic) ---
+    // --- Delete handler per user ---
     container.querySelectorAll(".btn-delete").forEach(btn => {
         btn.onclick = async () => {
             const u = btn.dataset.user;
@@ -1274,7 +1405,7 @@ renderUsers(list, container) {
 
             btn.disabled = true;
             const originalText = btn.innerText;
-            btn.innerText = "Deleting...";
+            btn.innerText = "Deleting…";
 
             try {
                 const res = await api.fetchApi(`/usgromana/api/users/${u}`, {
@@ -1284,7 +1415,7 @@ renderUsers(list, container) {
                 if (res.status === 200) {
                     const usersData = await getData("/usgromana/api/users");
                     const usersList = usersData?.users || [];
-                    self.renderUsers(usersList, container);
+                    self.renderUsers(usersList, container, { sortMode });
                 } else {
                     let msg = "Failed to delete user.";
                     try {
