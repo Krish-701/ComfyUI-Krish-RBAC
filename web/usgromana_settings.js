@@ -499,12 +499,12 @@ const ADMIN_STYLES = `
 .usgromana-users-table th.sortable:hover {
     color: #93c5fd;
 }
-.usgromana-users-table .col-num { width: 40px; text-align: center; opacity: 0.7; }
-.usgromana-users-table .col-name { min-width: 110px; font-weight: 600; }
-.usgromana-users-table .col-user { min-width: 160px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
-.usgromana-users-table .col-role { min-width: 100px; }
-.usgromana-users-table .col-sfw { width: 56px; text-align: center; }
-.usgromana-users-table .col-created { min-width: 110px; font-size: 12px; opacity: 0.9; }
+.usgromana-users-table .col-num { width: 36px; text-align: center; opacity: 0.7; font-size: 12px; }
+.usgromana-users-table .col-name { min-width: 90px; max-width: 130px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.usgromana-users-table .col-user { min-width: 140px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+.usgromana-users-table .col-role { width: 78px; min-width: 72px; max-width: 90px; }
+.usgromana-users-table .col-sfw { width: 48px; text-align: center; }
+.usgromana-users-table .col-created { min-width: 100px; font-size: 12px; opacity: 0.9; }
 .usgromana-users-table .col-actions { min-width: 220px; white-space: nowrap; }
 .usgromana-users-table .usgromana-btn {
     padding: 4px 10px;
@@ -513,9 +513,22 @@ const ADMIN_STYLES = `
     margin-bottom: 2px;
 }
 .usgromana-users-table .usgromana-select {
-    min-width: 90px;
-    padding: 4px 8px;
-    font-size: 12px;
+    min-width: 64px;
+    max-width: 78px;
+    width: 100%;
+    padding: 3px 4px;
+    font-size: 11px;
+}
+.usgromana-users-table .role-locked {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    background: rgba(255,107,107,0.15);
+    color: #ff6b6b;
+    border: 1px solid rgba(255,107,107,0.4);
 }
 .usgromana-users-table tr.is-disabled td {
     opacity: 0.55;
@@ -1031,6 +1044,10 @@ renderUsers(list, container, opts = {}) {
         created_old: "Last created (oldest)",
     };
 
+    // Short role labels (compact column, same spirit as short name list)
+    const ROLE_SHORT = { admin: "ADM", power: "PWR", user: "USR", guest: "GST" };
+    const LOCKED_ADMIN = "krish"; // system default admin — role always admin
+
     let rows = users
         .map((u, idx) => {
             const grp = u.groups && u.groups.length ? u.groups[0] : "user";
@@ -1038,6 +1055,7 @@ renderUsers(list, container, opts = {}) {
             const email = u.email || "";
             const isSelf = currentName && uname === currentName;
             const isGuest = uname.toLowerCase() === "guest";
+            const isLockedAdmin = uname.toLowerCase() === LOCKED_ADMIN;
             const sfwEnabled = u.sfw_check !== false;
             const isDisabled = !!u.disabled;
             const mustPw = !!u.must_change_password;
@@ -1045,6 +1063,7 @@ renderUsers(list, container, opts = {}) {
 
             const flags = [
                 isSelf ? '<span style="font-size:10px;opacity:.6;">you</span>' : "",
+                isLockedAdmin ? '<span style="font-size:10px;opacity:.65;">system</span>' : "",
                 isDisabled ? '<span style="color:#ff6b6b;font-size:10px;">disabled</span>' : "",
                 mustPw ? '<span style="color:#e0c35a;font-size:10px;">must PW</span>' : "",
             ]
@@ -1056,7 +1075,7 @@ renderUsers(list, container, opts = {}) {
                 !isGuest
                     ? `<button class="usgromana-btn secondary btn-reset-pw" data-user="${escapeHtml(uname)}">Reset PW</button>`
                     : "",
-                !isSelf && !isGuest
+                !isSelf && !isGuest && !isLockedAdmin
                     ? `<button class="usgromana-btn secondary btn-disable" data-user="${escapeHtml(uname)}" data-disabled="${isDisabled ? "1" : "0"}">${isDisabled ? "Enable" : "Disable"}</button>
                        <button class="usgromana-btn usgromana-btn-danger btn-delete" data-user="${escapeHtml(uname)}">Delete</button>`
                     : "",
@@ -1064,22 +1083,26 @@ renderUsers(list, container, opts = {}) {
                 .filter(Boolean)
                 .join("");
 
+            // Krish: fixed ADMIN badge (no role dropdown). Others: short role select.
+            const roleCell = isLockedAdmin
+                ? `<span class="role-locked" title="System admin — role locked">ADM</span>
+                   <input type="hidden" class="usgromana-role-select" data-user="${escapeHtml(uname)}" value="admin" />`
+                : `<select class="usgromana-role-select usgromana-select" data-user="${escapeHtml(uname)}" title="${escapeHtml(grp)}">
+                        ${GROUPS.map(
+                            (g) =>
+                                `<option value="${g}" ${g === grp ? "selected" : ""}>${ROLE_SHORT[g] || g.toUpperCase()}</option>`
+                        ).join("")}
+                   </select>`;
+
             return `
             <tr class="${isDisabled ? "is-disabled" : ""}" data-user="${escapeHtml(uname)}">
                 <td class="col-num">${idx + 1}</td>
-                <td class="col-name">
+                <td class="col-name" title="${escapeHtml(uname)}">
                     ${escapeHtml(uname)}
                     ${flags ? `<div style="margin-top:2px;">${flags}</div>` : ""}
                 </td>
                 <td class="col-user" title="${escapeHtml(email || "")}">${email ? escapeHtml(email) : '<span style="opacity:.5;">—</span>'}</td>
-                <td class="col-role">
-                    <select class="usgromana-role-select usgromana-select" data-user="${escapeHtml(uname)}" title="${escapeHtml(grp)}">
-                        ${GROUPS.map(
-                            (g) =>
-                                `<option value="${g}" ${g === grp ? "selected" : ""}>${g.toUpperCase()}</option>`
-                        ).join("")}
-                    </select>
-                </td>
+                <td class="col-role">${roleCell}</td>
                 <td class="col-sfw">
                     <input type="checkbox" class="usgromana-sfw-toggle" data-user="${escapeHtml(uname)}" ${sfwEnabled ? "checked" : ""} title="SFW check" />
                 </td>
@@ -1289,21 +1312,35 @@ renderUsers(list, container, opts = {}) {
     container.querySelectorAll(".btn-save").forEach(btn => {
         btn.onclick = async () => {
             const u = btn.dataset.user;
-            const g = container.querySelector(`select[data-user="${u}"]`).value;
+            // select or hidden input (locked Krish admin)
+            const roleEl =
+                container.querySelector(`select.usgromana-role-select[data-user="${u}"]`) ||
+                container.querySelector(`input.usgromana-role-select[data-user="${u}"]`);
+            const g = roleEl ? roleEl.value : "user";
 
             const sfwCheckbox = container.querySelector(`.usgromana-sfw-toggle[data-user="${u}"]`);
             const sfw = sfwCheckbox ? sfwCheckbox.checked : true;
 
             btn.innerText = "Saving…";
             try {
-                await api.fetchApi(`/usgromana/api/users/${u}`, {
+                const res = await api.fetchApi(`/usgromana/api/users/${u}`, {
                     method: "PUT",
                     body: JSON.stringify({
                         groups: [g],
                         sfw_check: sfw,
                     }),
                 });
-                btn.innerText = "Saved";
+                if (res && res.status && res.status >= 400) {
+                    let msg = "Save failed";
+                    try {
+                        const err = await res.json();
+                        if (err?.error) msg = err.error;
+                    } catch {}
+                    btn.innerText = "Error";
+                    window.alert(msg);
+                } else {
+                    btn.innerText = "Saved";
+                }
             } catch (e) {
                 console.error("[usgromana] Failed to update user:", e);
                 btn.innerText = "Error";

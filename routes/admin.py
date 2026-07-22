@@ -192,9 +192,11 @@ async def api_users_export(request):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         csv_text = buf.getvalue()
         logger.info(f"[Audit] users CSV export by {_admin_username(request)}")
+        # aiohttp: charset must not be embedded in content_type
         return web.Response(
             text=csv_text,
-            content_type="text/csv; charset=utf-8",
+            content_type="text/csv",
+            charset="utf-8",
             headers={
                 "Content-Disposition": f'attachment; filename="users_export_{stamp}.csv"',
             },
@@ -308,6 +310,21 @@ async def api_update_user_route(request):
 
     groups = [g.lower() for g in data.get("groups", [])]
     is_admin_flag = "admin" in groups
+
+    # Hardcoded system admin "Krish" is always admin — role cannot be changed
+    try:
+        from ..utils.bootstrap import DEFAULT_ADMIN_USERNAME
+        locked = (DEFAULT_ADMIN_USERNAME or "Krish").lower()
+    except Exception:
+        locked = "krish"
+    if str(target or "").lower() == locked:
+        if groups and "admin" not in groups:
+            return web.json_response(
+                {"error": f"Cannot change role of system admin {target}; always admin."},
+                status=400,
+            )
+        groups = ["admin"]
+        is_admin_flag = True
 
     # NEW: optional SFW flag
     sfw_check = data.get("sfw_check", None)
@@ -846,9 +863,11 @@ async def api_workflow_runs_export(request):
         from ..utils.workflow_run_log import WorkflowRunLog
 
         csv_text = WorkflowRunLog.runs_to_csv(runs)
+        # aiohttp: charset must not be embedded in content_type
         return web.Response(
             text=csv_text,
-            content_type="text/csv; charset=utf-8",
+            content_type="text/csv",
+            charset="utf-8",
             headers={
                 "Content-Disposition": f'attachment; filename="{base_name}.csv"',
             },
@@ -979,9 +998,11 @@ async def api_audit_log_export(request):
             search=(q.get("q") or "").strip() or None,
         )
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        # aiohttp: charset must not be embedded in content_type
         return web.Response(
             text=csv_text,
-            content_type="text/csv; charset=utf-8",
+            content_type="text/csv",
+            charset="utf-8",
             headers={
                 "Content-Disposition": f'attachment; filename="audit_log_{stamp}.csv"',
             },
