@@ -1809,6 +1809,12 @@ def create_comfy_user_middleware():
                 current_username_var.set(username)
             except Exception:
                 pass
+            try:
+                from .presence import touch
+
+                touch(username)
+            except Exception:
+                pass
 
         can_view_all = bool(user_id and access_control.user_can_view_all(user_id))
 

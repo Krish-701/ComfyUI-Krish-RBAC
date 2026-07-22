@@ -118,6 +118,11 @@ class JWTAuth:
                     or request.path.startswith("/api/assets")
                 )
                 self.access_control.set_current_user_id(user_id, set_fallback)
+                try:
+                    from .presence import touch
+                    touch(username)
+                except Exception:
+                    pass
 
             except jwt.ExpiredSignatureError:
                 return await handle_unauthorized_access(

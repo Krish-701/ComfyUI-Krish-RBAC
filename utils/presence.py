@@ -8,7 +8,7 @@ from typing import Any
 _lock = threading.RLock()
 # username -> last_seen_unix
 _presence: dict[str, float] = {}
-ONLINE_WINDOW_SEC = 120  # seen within 2 minutes = online
+ONLINE_WINDOW_SEC = 180  # seen within 3 minutes = online
 
 
 def touch(username: str | None) -> None:

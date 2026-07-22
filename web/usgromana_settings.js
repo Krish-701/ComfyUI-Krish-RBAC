@@ -1786,13 +1786,19 @@ async renderDashboard(container) {
             const online = d.online_users || [];
             const top = d.top_users_hour || [];
             const active = d.active_jobs || [];
+            const fmtAgo = (s) => {
+                const n = Number(s) || 0;
+                if (n < 60) return `${n}s ago`;
+                if (n < 3600) return `${Math.floor(n / 60)}m ago`;
+                return `${Math.floor(n / 3600)}h ago`;
+            };
             container.innerHTML = `
                 <div class="usgromana-section">
                     <h3>Krish RBAC Dashboard</h3>
                     <div style="display:flex;flex-wrap:wrap;gap:10px;margin:12px 0;">
                         <div style="padding:12px 16px;border-radius:10px;background:rgba(255,255,255,0.05);min-width:120px;">
-                            <div style="font-size:11px;opacity:.7;">Online</div>
-                            <div style="font-size:22px;font-weight:700;">${d.online_count || 0}</div>
+                            <div style="font-size:11px;opacity:.7;">Online now</div>
+                            <div style="font-size:22px;font-weight:700;color:#3dd68c;">${d.online_count || 0}</div>
                         </div>
                         <div style="padding:12px 16px;border-radius:10px;background:rgba(255,255,255,0.05);min-width:120px;">
                             <div style="font-size:11px;opacity:.7;">Queue (all)</div>
@@ -1815,13 +1821,39 @@ async renderDashboard(container) {
                             <div style="font-size:22px;font-weight:700;">${d.total_runs_all_time || 0}</div>
                         </div>
                     </div>
+
+                    <h4 style="margin-top:8px;">Current online users</h4>
+                    <p style="font-size:12px;opacity:.7;margin:0 0 8px;">Users active in the last ~3 minutes (any ComfyUI request).</p>
+                    <div style="overflow:auto;max-height:220px;margin-bottom:14px;">
+                        <table class="usgromana-table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Username</th>
+                                    <th>Last seen</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${
+                                    online.length
+                                        ? online
+                                              .map(
+                                                  (u, i) => `<tr>
+                                    <td>${i + 1}</td>
+                                    <td><strong>${escapeHtml(u.username || "")}</strong></td>
+                                    <td>${fmtAgo(u.seconds_ago)}</td>
+                                    <td style="color:#3dd68c;">● Online</td>
+                                </tr>`
+                                              )
+                                              .join("")
+                                        : `<tr><td colspan="4" style="text-align:center;opacity:.65;">No users online right now</td></tr>`
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+
                     <div class="usgromana-row" style="gap:16px;align-items:flex-start;flex-wrap:wrap;">
-                        <div style="flex:1;min-width:200px;">
-                            <h4>Online users</h4>
-                            <ul style="margin:6px 0 0 16px;padding:0;">
-                                ${online.length ? online.map(u => `<li><b>${escapeHtml(u.username)}</b> <span style="opacity:.6;font-size:11px;">${u.seconds_ago}s ago</span></li>`).join("") : "<li style='opacity:.6;'>Nobody active in last 2 min</li>"}
-                            </ul>
-                        </div>
                         <div style="flex:1;min-width:200px;">
                             <h4>Top users (last hour)</h4>
                             <ul style="margin:6px 0 0 16px;padding:0;">
@@ -1829,15 +1861,21 @@ async renderDashboard(container) {
                             </ul>
                         </div>
                         <div style="flex:1;min-width:220px;">
-                            <h4>Active now</h4>
+                            <h4>Active queue now</h4>
                             <ul style="margin:6px 0 0 16px;padding:0;font-size:12px;">
                                 ${active.length ? active.slice(0, 12).map(r => `<li>${r.status === "running" ? "▶" : "…"} <b>${escapeHtml(r.username || "?")}</b> — ${escapeHtml(r.workflow_name || "")}</li>`).join("") : "<li style='opacity:.6;'>Queue empty</li>"}
                             </ul>
                         </div>
                     </div>
                     <button class="usgromana-btn secondary" id="usgromana-dash-refresh" style="margin-top:12px;">Refresh</button>
+                    <small id="usgromana-dash-auto" class="usgromana-muted" style="margin-left:10px;">Auto-refresh 10s</small>
                 </div>`;
             container.querySelector("#usgromana-dash-refresh").onclick = () => load();
+            if (container._dashTimer) clearInterval(container._dashTimer);
+            container._dashTimer = setInterval(() => {
+                if (container.isConnected) load();
+                else clearInterval(container._dashTimer);
+            }, 10000);
         } catch (e) {
             console.error(e);
             container.innerHTML = `<div class="usgromana-section" style="color:#ff6b6b;">Dashboard error</div>`;

@@ -736,7 +736,15 @@ class AccessControl:
         process_item = kwargs.get("process_item")
         status = kwargs.get("status")
         with self.__prompt_queue.mutex:
-            item = self.__prompt_queue.currently_running.pop(item_id)
+            # Safe pop: admin cancel must not crash the worker if entry was already cleaned up
+            item = self.__prompt_queue.currently_running.pop(item_id, None)
+            if item is None:
+                # Still notify UI so queue is not stuck visually
+                try:
+                    self.server.queue_updated()
+                except Exception:
+                    pass
+                return
             while len(self.__prompt_queue.history) > MAXIMUM_HISTORY_SIZE:
                 self.__prompt_queue.history.pop(next(iter(self.__prompt_queue.history)))
 
@@ -759,6 +767,18 @@ class AccessControl:
                 self.users_db, meta.get("user_id")
             )
             workflow_name = meta.get("workflow_name") or "Unnamed workflow"
+            was_cancelled = False
+            try:
+                cancelled_ids = getattr(self, "_cancelled_prompt_ids", None)
+                if cancelled_ids and str(prompt_id) in cancelled_ids:
+                    was_cancelled = True
+                    cancelled_ids.discard(str(prompt_id))
+            except Exception:
+                pass
+            if was_cancelled and isinstance(status_dict, dict):
+                status_dict = dict(status_dict)
+                status_dict["status_str"] = "cancelled"
+                status_dict["completed"] = False
             self.__prompt_queue.history[prompt_id] = {
                 "prompt": prompt_stored,
                 "outputs": {},
@@ -776,7 +796,9 @@ class AccessControl:
                     completed_flag = status_dict.get("completed")
                 elif hasattr(status, "completed"):
                     completed_flag = getattr(status, "completed", None)
-                if completed_flag is False:
+                if was_cancelled:
+                    final_status = "cancelled"
+                elif completed_flag is False:
                     final_status = "error"
                 elif completed_flag is True:
                     final_status = "completed"
@@ -913,20 +935,51 @@ class AccessControl:
                 ]
             self.server.queue_updated()
 
+    def _interrupt_comfy_execution(self) -> None:
+        """Ask ComfyUI to stop the current running prompt (safe for the worker thread)."""
+        # Prefer official interrupt flags used by /interrupt
+        try:
+            import nodes
+
+            if hasattr(nodes, "interrupt_processing"):
+                nodes.interrupt_processing(True)
+        except Exception as e:
+            print(f"[Usgromana] nodes.interrupt_processing: {e}")
+        try:
+            import comfy.model_management as mm
+
+            if hasattr(mm, "interrupt_current_processing"):
+                mm.interrupt_current_processing(True)
+            elif hasattr(mm, "interrupt_processing"):
+                mm.interrupt_processing(True)
+        except Exception as e:
+            print(f"[Usgromana] model_management interrupt: {e}")
+        try:
+            interrupt = getattr(self.server, "interrupt_processing", None) or getattr(
+                self.server, "interrupt_current", None
+            )
+            if callable(interrupt):
+                interrupt()
+        except Exception as e:
+            print(f"[Usgromana] server interrupt: {e}")
+
     def cancel_job_by_prompt_id(self, prompt_id: str, *, actor_can_view_all: bool = False) -> dict:
         """
         Cancel a pending or running job by prompt_id.
-        Admin/power (actor_can_view_all) may cancel anyone's job.
-        Regular users only their own.
+
+        Pending: remove from heap immediately.
+        Running: interrupt Comfy execution and leave currently_running for the
+        worker to finish via task_done (do NOT pop it here — that bricks later runs).
         """
         if not prompt_id:
             return {"ok": False, "error": "Missing prompt_id"}
         pid = str(prompt_id)
         current_user = self.get_current_user_id()
         found = None
+        need_interrupt = False
 
         with self.__prompt_queue.mutex:
-            # Pending queue
+            # 1) Pending queue — safe to remove immediately
             for i, item in enumerate(list(self.__prompt_queue.queue)):
                 meta, body = _usgromana_meta_from_queue_entry(item)
                 body_pid = body[1] if isinstance(body, tuple) and len(body) > 1 else None
@@ -934,7 +987,11 @@ class AccessControl:
                     continue
                 owner = meta.get("user_id")
                 if not actor_can_view_all and owner != current_user:
-                    return {"ok": False, "error": "Not allowed to cancel this job", "code": "FORBIDDEN"}
+                    return {
+                        "ok": False,
+                        "error": "Not allowed to cancel this job",
+                        "code": "FORBIDDEN",
+                    }
                 self.__prompt_queue.queue.pop(i)
                 heapq.heapify(self.__prompt_queue.queue)
                 found = {
@@ -948,7 +1005,7 @@ class AccessControl:
                 }
                 break
 
-            # Running — remove from currently_running and try interrupt
+            # 2) Running — only interrupt; worker must call task_done itself
             if not found:
                 for task_id, item in list(self.__prompt_queue.currently_running.items()):
                     meta, body = _usgromana_meta_from_queue_entry(item)
@@ -962,7 +1019,11 @@ class AccessControl:
                             "error": "Not allowed to cancel this job",
                             "code": "FORBIDDEN",
                         }
-                    self.__prompt_queue.currently_running.pop(task_id, None)
+                    # Track that this prompt was cancelled for status logging
+                    if not hasattr(self, "_cancelled_prompt_ids"):
+                        self._cancelled_prompt_ids = set()
+                    self._cancelled_prompt_ids.add(pid)
+                    need_interrupt = True
                     found = {
                         "ok": True,
                         "cancelled": "running",
@@ -971,36 +1032,32 @@ class AccessControl:
                         "username": meta.get("username")
                         or _resolve_username_for_queue(self.users_db, owner),
                         "workflow_name": meta.get("workflow_name") or "Unnamed workflow",
+                        "note": "Interrupt sent; job will free the queue slot when the worker stops",
                     }
                     break
 
-            if found:
+            if found and found.get("cancelled") == "pending":
                 self.server.queue_updated()
 
         if not found:
             return {"ok": False, "error": "Job not found in queue", "code": "NOT_FOUND"}
 
-        # Interrupt execution if Comfy exposes it
-        try:
-            nodes = getattr(self.server, "prompt_queue", None)
-            # Common ComfyUI interrupt hooks
-            if hasattr(self.server, "send_sync"):
-                try:
-                    self.server.send_sync("status", {"status": {"exec_info": {"queue_remaining": 0}}})
-                except Exception:
-                    pass
-            interrupt = getattr(self.server, "interrupt_processing", None) or getattr(
-                self.server, "interrupt_current", None
-            )
-            if callable(interrupt) and found.get("cancelled") == "running":
-                interrupt()
-        except Exception as e:
-            print(f"[Usgromana] interrupt after cancel: {e}")
+        if need_interrupt:
+            self._interrupt_comfy_execution()
+            try:
+                self.server.queue_updated()
+            except Exception:
+                pass
 
         try:
             from .workflow_run_log import get_run_log
 
-            get_run_log().update_status(pid, "cancelled", finished=True)
+            # Pending is fully gone now; running will also be marked when task_done fires
+            get_run_log().update_status(
+                pid,
+                "cancelled",
+                finished=(found.get("cancelled") == "pending"),
+            )
         except Exception:
             pass
 
