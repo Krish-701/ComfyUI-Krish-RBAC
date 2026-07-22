@@ -279,7 +279,7 @@ export function installDenialToastWatcher(options = {}) {
                     ) {
                         msg = "ComfyUI-Manager is not available for your role.";
                     } else {
-                        msg = "Usgromana: Access Denied";
+                        msg = "Krish: Access Denied";
                     }
                 }
                 notifyAccessDenied({

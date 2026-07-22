@@ -288,10 +288,10 @@ class AccessControl:
             is_userdata_workflow = path.startswith(("/api/userdata/workflows", "/api/userdata/workflows:"))
 
             if is_queue and perms.get("can_run") is False:
-                return web.json_response({"error": "Usgromana: Execution Denied"}, status=403)
+                return web.json_response({"error": "Krish: Execution Denied"}, status=403)
 
             if is_upload and perms.get("can_upload") is False:
-                return web.json_response({"error": "Usgromana: Upload Denied"}, status=403)
+                return web.json_response({"error": "Krish: Upload Denied"}, status=403)
 
             if is_userdata_workflow and request.method in ("POST", "PUT", "DELETE", "PATCH"):
                 can_modify = perms.get("can_modify_workflows")
@@ -299,7 +299,7 @@ class AccessControl:
                 if role == "admin": can_modify = True
 
                 if not can_modify:
-                    return web.json_response({"error": "Usgromana: Workflow Denied", "code": "WORKFLOW_DENIED", "role": role}, status=403)
+                    return web.json_response({"error": "Krish: Workflow Denied", "code": "WORKFLOW_DENIED", "role": role}, status=403)
 
             for perm_key, blocked_paths in EXTENSION_BLOCK_MAP.items():
                 allow = perms.get(perm_key)
@@ -308,11 +308,11 @@ class AccessControl:
                 if allow is False:
                     for blocked_prefix in blocked_paths:
                         if path.lower().startswith(blocked_prefix.lower()):
-                            return web.Response(status=403, text="Usgromana: Access Denied")
+                            return web.Response(status=403, text="Krish: Access Denied")
 
             if not is_queue and not is_upload and path.startswith("/api/"):
                 if perms.get("can_access_api") is False:
-                    return web.json_response({"error": "Usgromana: API Denied"}, status=403)
+                    return web.json_response({"error": "Krish: API Denied"}, status=403)
 
             return await handler(request)
         return middleware

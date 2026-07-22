@@ -170,6 +170,20 @@ const CSS_BLOCK_MAP = {
         ".templates-tab-button",
         ".templates-tab-button .side-bar-button-label"
     ],
+    // Workflows left sidebar tab (hide for guest)
+    "ui_side_workflows": [
+        "[title='Workflows']",
+        "[aria-label='Workflows']",
+        "button[aria-label='Workflows']",
+        "button[title='Workflows']",
+        ".p-button[aria-label='Workflows']",
+        ".comfyui-workflows-button",
+        ".workflows-tab-button",
+        "button.workflows-tab-button",
+        "#comfy-view-workflows-button",
+        ".side-bar-button[aria-label='Workflows']",
+        "[data-tooltip='Workflows']"
+    ],
     
     // --- Standard Menus (New Vue/Prime UI + legacy ids) ---
     // NOTE:
@@ -2819,6 +2833,7 @@ renderNsfwManagement(container) {
         html += drawRow("Sidebar: Queue", "ui_side_queue");
         html += drawRow("Sidebar: Assets", "ui_side_assets");
         html += drawRow("Sidebar: Templates", "ui_side_templates");
+        html += drawRow("Sidebar: Workflows", "ui_side_workflows");
         html += drawRow("Sidebar Menu: Browse Templates", "ui_menu_templates");
         html += drawRow("Sidebar Menu: Manage Extensions", "ui_menu_extensions");
         html += drawRow("Sidebar Menu: Manager Button", "ui_menu_manager");
@@ -2826,7 +2841,7 @@ renderNsfwManagement(container) {
         //  Section 3: Settings Menu Options
         html += drawRow("Settings Menu", null, true);
         html += drawRow("Settings Menu: User", "settings_user");
-        html += drawRow("Settings Menu: Usgromana", "settings_usgromanasettings");
+        html += drawRow("Settings Menu: Krish / Usgromana", "settings_usgromanasettings");
         html += drawRow("Settings Menu: Mask Editor", "settings_maskeditor");
         html += drawRow("Settings Menu: Keybinding", "settings_keybinding");
         html += drawRow("Settings Menu: Appearance", "settings_makadiappearance");
@@ -2910,11 +2925,19 @@ async function updateEnforcementStyles() {
         const guestCfg = groupsConfig["guest"] || {};
 
         for (const [key, selectors] of Object.entries(CSS_BLOCK_MAP)) {
-            // Always allow usgromana settings menu and logout for guests
+            // Always allow Krish/Usgromana settings menu entry (logout lives there) for guests
             if (key === "settings_usgromanasettings" || key === "settings_Usgromanasettings") {
                 continue; // Skip blocking this menu item
             }
             
+            // Guest: Settings gear + Workflows sidebar always hidden (ignore config true)
+            if (key === "ui_settings_button" || key === "ui_side_workflows") {
+                css +=
+                    selectors.join(", ") +
+                    " { display: none !important; opacity: 0 !important; pointer-events: none !important; visibility: hidden !important; } \n";
+                continue;
+            }
+
             const allowed = guestCfg[key] === true; // only explicit true is allowed
             if (!allowed) {
                 css +=
@@ -2924,9 +2947,35 @@ async function updateEnforcementStyles() {
         }
 
         css += `.usgromana-blocked-item { display: none !important; }`;
-        // Always show logout button and usgromana menu - never hide them for guests
+        // Always show logout button and Krish/Usgromana menu - never hide them for guests
         css += `#usgromana-settings-logout-btn, [data-usgromana-always-visible="true"] { display: block !important; visibility: visible !important; opacity: 1 !important; }`;
-        css += `li[aria-label='usgromana'], li[aria-label='Usgromana'], li.p-listbox-option[aria-label='usgromana'], li.p-listbox-option[aria-label='Usgromana'] { display: block !important; visibility: visible !important; opacity: 1 !important; }`;
+        css += `li[aria-label='usgromana'], li[aria-label='Usgromana'], li[aria-label='Krish RBAC'], li.p-listbox-option[aria-label='usgromana'], li.p-listbox-option[aria-label='Usgromana'], li.p-listbox-option[aria-label='Krish RBAC'] { display: block !important; visibility: visible !important; opacity: 1 !important; }`;
+
+        // Extra guest hard-hide for late-rendered Settings/Workflows controls
+        css += `
+            button.comfy-settings-btn,
+            .comfy-settings-btn,
+            button[aria-label='Settings'],
+            [aria-label='Settings'],
+            button[title='Settings'],
+            [title='Settings'],
+            button[aria-label='Workflows'],
+            [aria-label='Workflows'],
+            button[title='Workflows'],
+            [title='Workflows'],
+            .p-button[aria-label='Workflows'],
+            .side-bar-button[aria-label='Workflows'] {
+                display: none !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
+                visibility: hidden !important;
+                width: 0 !important;
+                height: 0 !important;
+                overflow: hidden !important;
+                margin: 0 !important;
+                padding: 0 !important;
+            }
+        `;
 
         let styleTag = document.getElementById("usgromana-css-block");
         if (!styleTag) {
@@ -2938,6 +2987,7 @@ async function updateEnforcementStyles() {
 
         enforceSidebar(guestCfg, role);
         enforceMenus(guestCfg, role);
+        enforceGuestUiHardHide();
         patchSaveConfirmDialog(guestCfg, role);
         
         // Ensure logout button is always visible for guests
@@ -3006,6 +3056,46 @@ async function updateEnforcementStyles() {
         logoutBtn.style.opacity = "1";
         logoutBtn.classList.remove("usgromana-blocked-item");
     }
+}
+
+// Guest: hide Settings gear + Workflows tab by label/text (covers Vue re-renders)
+function enforceGuestUiHardHide() {
+    if (!currentUser || (currentUser.role || "") !== "guest") return;
+
+    const hideEl = (el) => {
+        if (!el || !el.style) return;
+        el.classList.add("usgromana-blocked-item");
+        el.style.setProperty("display", "none", "important");
+        el.style.setProperty("visibility", "hidden", "important");
+        el.style.setProperty("pointer-events", "none", "important");
+    };
+
+    // Settings gear / buttons
+    document.querySelectorAll(
+        "button.comfy-settings-btn, .comfy-settings-btn, button[aria-label='Settings'], [aria-label='Settings'], button[title='Settings'], [title='Settings']"
+    ).forEach(hideEl);
+
+    // Workflows sidebar entries
+    document.querySelectorAll(
+        "button[aria-label='Workflows'], [aria-label='Workflows'], button[title='Workflows'], [title='Workflows'], .p-button[aria-label='Workflows']"
+    ).forEach(hideEl);
+
+    // Side-bar buttons labeled by inner text
+    document.querySelectorAll(
+        ".side-bar-button, button.side-bar-button, .p-button, button[class*='side-bar']"
+    ).forEach((el) => {
+        const label = (
+            el.getAttribute("aria-label") ||
+            el.getAttribute("title") ||
+            el.innerText ||
+            ""
+        )
+            .trim()
+            .toLowerCase();
+        if (label === "workflows" || label === "settings" || label.startsWith("workflows\n") || label.startsWith("settings\n")) {
+            hideEl(el);
+        }
+    });
 }
 
 // Sidebar Scanner: Runs periodically to hide settings menu buttons by text content
@@ -3397,6 +3487,7 @@ app.registerExtension({
 
             // Menus & save-confirm popup
             enforceMenus(cfg, role);
+            if (role === "guest") enforceGuestUiHardHide();
             patchSaveConfirmDialog(cfg, role);
             
             // Ensure logout button is always visible for all users - cache the query
