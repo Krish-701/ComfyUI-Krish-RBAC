@@ -127,6 +127,21 @@ const WORKFLOW_RUNS_EXPORT_API = "/usgromana/api/workflow-runs/export";
 // If a user lacks permission for the Key, these CSS selectors are hidden via !important
 const CSS_BLOCK_MAP = {
     // --- Core UI ---
+    // Hide Comfy Settings gear for restricted roles (user/guest)
+    "ui_settings_button": [
+        ".comfy-settings-btn",
+        "button.comfy-settings-btn",
+        "button[aria-label='Settings']",
+        "[aria-label='Settings']",
+        "button[title='Settings']",
+        "[title='Settings']",
+        ".p-button[aria-label='Settings']",
+        "button .pi-cog",
+        ".pi-cog",
+        "#comfy-settings-button",
+        ".comfyui-button[aria-label='Settings']",
+        "button[aria-label*='etting']"
+    ],
     "ui_queue_button": ["#queue-button", ".queue-button", "button.queue-button"],
     "ui_batch_widget": [".comfy-menu-queue-batch"],
     "ui_extra_options": [".comfy-menu-queue-extra"],
@@ -907,123 +922,131 @@ class usgromanaDialog extends ComfyDialog {
 renderUsers(list, container) {
     const currentName = currentUser?.username || null;
     const self = this;
+    const users = Array.isArray(list) ? list : [];
 
-    let html = `
-        <div class="usgromana-section" style="margin-bottom:18px;">
-            <h3>Bulk Import Users (CSV)</h3>
-            <p>
-                Format: <code>name,email,password,role</code><br>
-                Example: <code>nkrishnan,nkrishnan@pixstone.com,Nkri@Sh12,user</code><br>
-                Users log in with their <strong>email</strong> (username also works). Roles:
-                admin, power, user, guest.
-            </p>
-            <div class="usgromana-row" style="gap:8px; flex-wrap:wrap; align-items:center;">
-                <input type="file" id="usgromana-bulk-file" accept=".csv,text/csv,text/plain" />
-                <button class="usgromana-btn secondary" id="usgromana-bulk-import">Import CSV</button>
-                <button class="usgromana-btn secondary" id="usgromana-users-export" title="Download name,email,password,role CSV">
-                    Export Users CSV
-                </button>
+    const roleBadge = (grp) => {
+        const colors = {
+            admin: "#ff6b6b",
+            power: "#6eb6ff",
+            user: "#3dd68c",
+            guest: "#888",
+        };
+        const c = colors[grp] || "#aaa";
+        return `<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;background:${c}22;color:${c};border:1px solid ${c}55;">${escapeHtml((grp || "user").toUpperCase())}</span>`;
+    };
+
+    let cards = users
+        .map((u) => {
+            const grp = u.groups && u.groups.length ? u.groups[0] : "user";
+            const uname = u.username || "unknown";
+            const email = u.email || "";
+            const isSelf = currentName && uname === currentName;
+            const isGuest = uname.toLowerCase() === "guest";
+            const sfwEnabled = u.sfw_check !== false;
+            const isDisabled = !!u.disabled;
+            const mustPw = !!u.must_change_password;
+
+            return `
+            <div class="usgromana-user-card" data-user="${escapeHtml(uname)}" style="
+                border:1px solid rgba(255,255,255,0.1);
+                border-radius:12px;
+                padding:14px 16px;
+                background:rgba(0,0,0,0.18);
+                display:flex;
+                flex-direction:column;
+                gap:10px;
+                ${isDisabled ? "opacity:0.55;" : ""}
+            ">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+                    <div>
+                        <div style="font-size:15px;font-weight:700;">${escapeHtml(uname)}
+                            ${isSelf ? '<span style="font-size:11px;opacity:.6;">(you)</span>' : ""}
+                        </div>
+                        <div style="font-size:12px;opacity:.75;margin-top:2px;">${email ? escapeHtml(email) : "No email"}</div>
+                        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                            ${roleBadge(grp)}
+                            ${isDisabled ? '<span style="color:#ff6b6b;font-size:11px;">Disabled</span>' : ""}
+                            ${mustPw ? '<span style="color:#e0c35a;font-size:11px;">Must change PW</span>' : ""}
+                        </div>
+                    </div>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+                        <input type="checkbox" class="usgromana-sfw-toggle" data-user="${escapeHtml(uname)}" ${sfwEnabled ? "checked" : ""} />
+                        SFW
+                    </label>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+                    <label style="font-size:11px;opacity:.7;">Role</label>
+                    <select class="usgromana-role-select usgromana-select" data-user="${escapeHtml(uname)}" style="min-width:120px;padding:6px 10px;">
+                        ${GROUPS.map(
+                            (g) =>
+                                `<option value="${g}" ${g === grp ? "selected" : ""}>${g.toUpperCase()}</option>`
+                        ).join("")}
+                    </select>
+                    <div style="flex:1"></div>
+                    <button class="usgromana-btn btn-save" data-user="${escapeHtml(uname)}">Save</button>
+                    ${
+                        !isGuest
+                            ? `<button class="usgromana-btn secondary btn-reset-pw" data-user="${escapeHtml(uname)}">Reset PW</button>`
+                            : ""
+                    }
+                    ${
+                        !isSelf && !isGuest
+                            ? `<button class="usgromana-btn secondary btn-disable" data-user="${escapeHtml(uname)}" data-disabled="${isDisabled ? "1" : "0"}">${isDisabled ? "Enable" : "Disable"}</button>
+                       <button class="usgromana-btn usgromana-btn-danger btn-delete" data-user="${escapeHtml(uname)}">Delete</button>`
+                            : ""
+                    }
+                </div>
+            </div>`;
+        })
+        .join("");
+
+    if (!cards) {
+        cards = `<div style="opacity:.7;padding:20px;text-align:center;">No users found.</div>`;
+    }
+
+    container.innerHTML = `
+        <div class="usgromana-section">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+                <div>
+                    <h3 style="margin:0;">Users &amp; Roles</h3>
+                    <p style="margin:4px 0 0;font-size:12px;opacity:.75;">${users.length} account(s) · shared templates: <code>custom_nodes/Templates</code></p>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button class="usgromana-btn secondary" id="usgromana-users-export">Export CSV</button>
+                    <button class="usgromana-btn secondary" id="usgromana-bulk-toggle">Bulk import ▾</button>
+                </div>
             </div>
-            <p style="font-size:12px;opacity:.75;margin:6px 0 0;">
-                Export columns: <code>name,email,password,role</code>.
-                Password is the stored hash (plain passwords cannot be recovered). Use <strong>Reset PW</strong> to set a new password.
-            </p>
-            <div style="margin-top:10px;">
-                <label class="usgromana-field-label">Or paste CSV</label>
-                <textarea id="usgromana-bulk-text" class="usgromana-textarea" rows="5"
-                    placeholder="name,email,password,role&#10;nkrishnan,nkrishnan@pixstone.com,Nkri@Sh12,user"></textarea>
-            </div>
-            <div style="margin-top:8px;">
+
+            <div id="usgromana-bulk-panel" style="display:none;margin-bottom:16px;padding:14px;border-radius:12px;border:1px dashed rgba(255,255,255,0.15);background:rgba(0,0,0,0.15);">
+                <h4 style="margin:0 0 8px;">Bulk import (CSV)</h4>
+                <p style="font-size:12px;opacity:.8;margin:0 0 8px;">
+                    Format: <code>name,email,password,role</code> — e.g. <code>nkrishnan,nkrishnan@pixstone.com,Nkri@Sh12,user</code>
+                </p>
+                <div class="usgromana-row" style="gap:8px;flex-wrap:wrap;align-items:center;">
+                    <input type="file" id="usgromana-bulk-file" accept=".csv,text/csv,text/plain" />
+                    <button class="usgromana-btn secondary" id="usgromana-bulk-import">Import CSV</button>
+                </div>
+                <textarea id="usgromana-bulk-text" class="usgromana-textarea" rows="4" style="margin-top:8px;width:100%;"
+                    placeholder="name,email,password,role"></textarea>
                 <small id="usgromana-bulk-status" class="usgromana-muted"></small>
+                <pre id="usgromana-bulk-result" style="margin-top:8px;max-height:140px;overflow:auto;font-size:11px;display:none;background:rgba(0,0,0,.25);padding:8px;border-radius:8px;"></pre>
             </div>
-            <pre id="usgromana-bulk-result" style="margin-top:8px;max-height:160px;overflow:auto;font-size:12px;display:none;background:rgba(0,0,0,.25);padding:10px;border-radius:8px;"></pre>
-        </div>
 
-        <table class="usgromana-table">
-            <thead>
-                <tr>
-                    <th>User Account</th>
-                    <th>Email (login)</th>
-                    <th>Assigned Group</th>
-                    <th style="text-align:center;width:120px;">SFW Check</th>
-                    <th style="text-align:right;width:180px;">Actions</th>
-                </tr>
-            </thead>
-            <tbody>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;">
+                ${cards}
+            </div>
+        </div>
     `;
 
-    list.forEach(u => {
-        const grp = (u.groups && u.groups.length) ? u.groups[0] : "user";
-        const uname = u.username || "unknown";
-        const email = u.email || "";
-        const isSelf = currentName && uname === currentName;
-        const isGuest = uname.toLowerCase() === "guest";
-
-        // Per-user SFW: when enabled, NSFW-tagged images are hidden in gallery and Assets
-        const sfwEnabled = u.sfw_check !== false;
-
-        let actionsHtml = `
-            <button class="usgromana-btn btn-save" data-user="${uname}">
-                Save Changes
-            </button>
-        `;
-
-        if (!isGuest) {
-            actionsHtml += `
-                <button class="usgromana-btn secondary btn-reset-pw" data-user="${uname}" title="Set a new password">
-                    Reset PW
-                </button>
-            `;
-        }
-
-        const isDisabled = !!u.disabled;
-        if (!isSelf && !isGuest) {
-            actionsHtml += `
-                <button class="usgromana-btn secondary btn-disable" data-user="${uname}" data-disabled="${isDisabled ? "1" : "0"}">
-                    ${isDisabled ? "Enable" : "Disable"}
-                </button>
-            `;
-            actionsHtml += `
-                <button class="usgromana-btn usgromana-btn-danger btn-delete" data-user="${uname}">
-                    Delete
-                </button>
-            `;
-        }
-
-        html += `
-            <tr style="${isDisabled ? "opacity:0.55;" : ""}">
-                <td><strong>${escapeHtml(uname)}</strong>${isDisabled ? ' <span style="color:#ff6b6b;font-size:11px;">(disabled)</span>' : ""}${u.must_change_password ? ' <span style="color:#e0c35a;font-size:11px;">(must change PW)</span>' : ""}</td>
-                <td style="opacity:.9;font-size:12px;">${email ? escapeHtml(email) : "—"}</td>
-                <td>
-                    <select
-                        class="usgromana-role-select"
-                        data-user="${uname}"
-                        style="background:var(--comfy-input-bg); color:var(--input-text); border:1px solid #555; padding:6px 10px; border-radius:4px; width: 150px;"
-                    >
-                        ${GROUPS.map(g => `
-                            <option value="${g}" ${g === grp ? "selected" : ""}>
-                                ${g.toUpperCase()}
-                            </option>
-                        `).join("")}
-                    </select>
-                </td>
-                <td style="text-align:center">
-                    <input
-                        type="checkbox"
-                        class="usgromana-sfw-toggle"
-                        data-user="${uname}"
-                        ${sfwEnabled ? "checked" : ""}
-                    />
-                </td>
-                <td style="text-align:right; display:flex; flex-wrap:wrap; gap:6px; justify-content:flex-end;">
-                    ${actionsHtml}
-                </td>
-            </tr>
-        `;
-    });
-
-    html += `</tbody></table>`;
-    container.innerHTML = html;
+    const bulkToggle = container.querySelector("#usgromana-bulk-toggle");
+    const bulkPanel = container.querySelector("#usgromana-bulk-panel");
+    if (bulkToggle && bulkPanel) {
+        bulkToggle.onclick = () => {
+            const open = bulkPanel.style.display !== "none";
+            bulkPanel.style.display = open ? "none" : "block";
+            bulkToggle.textContent = open ? "Bulk import ▾" : "Bulk import ▴";
+        };
+    }
 
     // --- Bulk CSV import ---
     const bulkFile = container.querySelector("#usgromana-bulk-file");
@@ -2616,6 +2639,7 @@ renderNsfwManagement(container) {
         html += drawRow("Upload Files", "can_upload");
         html += drawRow("SettingsExtension", "settings_extension");
         html += drawRow("See Restricted Settings", "can_see_restricted_settings");
+        html += drawRow("Settings gear button (hide for users)", "ui_settings_button");
 
         // Section 2: Global UI
         html += drawRow("Interface Elements", null, true);
@@ -2709,8 +2733,8 @@ async function updateEnforcementStyles() {
     //});
 
     // --- BYPASS ADMIN COMPLETELY ---
-    if (currentUser.is_admin) {
-        const style = document.getElementById("Usgromana-css-block");
+    if (currentUser.is_admin || currentUser.role === "admin") {
+        const style = document.getElementById("usgromana-css-block") || document.getElementById("Usgromana-css-block");
         if (style) style.textContent = "";
         return;
     }
@@ -3245,10 +3269,10 @@ app.registerExtension({
         // Store interval ID for potential cleanup (though this extension typically lives for the page lifetime)
         window._usgromanaEnforcementInterval = enforcementInterval;
 
-        // Register "Manage Usgromana" Button in Settings
+        // Register "Manage Krish RBAC" Button in Settings (admin/power still use floating button)
 app.ui.settings.addSetting({
     id: "Usgromana.Configuration",
-    name: "Usgromana",
+    name: "Krish RBAC",
     type: () => {
         const wrapper = document.createElement("div");
         wrapper.style.display = "flex";
@@ -3273,7 +3297,7 @@ app.ui.settings.addSetting({
 
         // Main management button
         const btn = document.createElement("button");
-        btn.innerText = "Manage Usgromana Permissions";
+        btn.innerText = "Manage Krish RBAC";
         btn.className = "usgromana-launch-btn";
         btn.onclick = () => new usgromanaDialog().show();
 

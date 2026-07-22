@@ -17,6 +17,37 @@ POTENTIAL_GLOBALS = [
     os.path.join(COMFY_ROOT, "user_data", "workflows"),
 ]
 
+# Shared read-only templates for all users:
+#   <ComfyUI>/custom_nodes/Templates/*.json
+def get_shared_templates_dir() -> str:
+    """
+    Resolve custom_nodes/Templates (sibling of this extension under custom_nodes).
+    """
+    candidates = [
+        os.path.join(COMFY_ROOT, "custom_nodes", "Templates"),
+        # If this package lives at custom_nodes/ComfyUI-Krish-RBAC
+        os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "Templates")),
+        os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "Templates")),
+    ]
+    seen = set()
+    for p in candidates:
+        norm = os.path.normpath(p)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if os.path.isdir(norm):
+            return norm
+    # Default preferred path (create on first use for admins / deploy)
+    preferred = os.path.join(COMFY_ROOT, "custom_nodes", "Templates")
+    try:
+        os.makedirs(preferred, exist_ok=True)
+    except OSError:
+        pass
+    return preferred
+
+
+SHARED_TEMPLATE_PREFIX = "Templates/"
+
 
 def get_current_user(request):
     """
@@ -90,7 +121,7 @@ def sanitize_name(name: str | None) -> str | None:
 
 
 # --- Helper: Get File Info ---
-def get_file_info(root_dir: str, rel_path: str) -> dict:
+def get_file_info(root_dir: str, rel_path: str, *, writable: bool = True, shared: bool = False) -> dict:
     full_path = os.path.join(root_dir, rel_path)
 
     rel_norm = rel_path.replace("\\", "/")
@@ -127,7 +158,9 @@ def get_file_info(root_dir: str, rel_path: str) -> dict:
         "created": stats["created"],
         "modified": stats["modified"],
         "size": stats["size"],
-        "writable": True,
+        "writable": bool(writable),
+        "shared_template": bool(shared),
+        "read_only": not bool(writable),
     }
 
     # Some UI expects nested data
@@ -135,10 +168,48 @@ def get_file_info(root_dir: str, rel_path: str) -> dict:
     return base_info
 
 
+def _is_shared_template_name(name: str | None) -> bool:
+    if not name:
+        return False
+    n = name.replace("\\", "/").lstrip("/")
+    return n.startswith(SHARED_TEMPLATE_PREFIX) or n.startswith("Templates/")
+
+
+def _strip_template_prefix(name: str) -> str:
+    n = name.replace("\\", "/").lstrip("/")
+    if n.startswith(SHARED_TEMPLATE_PREFIX):
+        return n[len(SHARED_TEMPLATE_PREFIX) :]
+    if n.startswith("Templates/"):
+        return n[len("Templates/") :]
+    return n
+
+
 # --- 1. LIST (GET) ---
 async def list_workflows(request, full_info: bool = False):
     user = get_current_user(request)
     files_map: dict[str, dict] = {}
+
+    # Shared templates (read-only for everyone)
+    templates_dir = get_shared_templates_dir()
+    if os.path.isdir(templates_dir):
+        for root, _, files in os.walk(templates_dir):
+            for f in files:
+                if f.endswith(".json"):
+                    rel = os.path.relpath(os.path.join(root, f), templates_dir)
+                    rel_key = rel.replace("\\", "/")
+                    display_key = f"{SHARED_TEMPLATE_PREFIX}{rel_key}"
+                    info = get_file_info(
+                        templates_dir, rel, writable=False, shared=True
+                    )
+                    # Surface under Templates/ so users see shared vs private
+                    info["name"] = display_key
+                    info["filename"] = f.split("/")[-1] if "/" in display_key else f
+                    info["file"] = display_key
+                    info["id"] = display_key
+                    info["path"] = display_key
+                    info["subfolder"] = "Templates"
+                    info["data"] = info.copy()
+                    files_map[display_key] = info
 
     # Global
     for global_dir in POTENTIAL_GLOBALS:
@@ -148,7 +219,8 @@ async def list_workflows(request, full_info: bool = False):
                     if f.endswith(".json"):
                         rel = os.path.relpath(os.path.join(root, f), global_dir)
                         key = rel.replace("\\", "/")
-                        files_map[key] = get_file_info(global_dir, rel)
+                        if key not in files_map:
+                            files_map[key] = get_file_info(global_dir, rel)
 
     # Private
     if user != "guest":
@@ -159,7 +231,9 @@ async def list_workflows(request, full_info: bool = False):
                     if f.endswith(".json"):
                         rel = os.path.relpath(os.path.join(root, f), user_dir)
                         key = rel.replace("\\", "/")
-                        files_map[key] = get_file_info(user_dir, rel)
+                        # Private never overwrites shared template keys
+                        if key not in files_map and not key.startswith("Templates/"):
+                            files_map[key] = get_file_info(user_dir, rel)
         else:
             os.makedirs(user_dir, exist_ok=True)
 
@@ -186,9 +260,24 @@ async def save_workflow(request, name_override: str | None = None):
         if not name:
             name = "untitled.json"
 
+        # Shared templates are read-only for everyone (open & use, never overwrite)
+        if _is_shared_template_name(name):
+            return web.json_response(
+                {
+                    "error": "Shared templates are read-only. Open the template, then Save As a personal workflow.",
+                    "code": "TEMPLATE_READ_ONLY",
+                },
+                status=403,
+            )
+
         clean_name = sanitize_name(name)
         if not clean_name:
             return web.Response(status=400, text="Invalid filename")
+        if _is_shared_template_name(clean_name):
+            return web.json_response(
+                {"error": "Shared templates are read-only", "code": "TEMPLATE_READ_ONLY"},
+                status=403,
+            )
 
         user_dir = user_env.get_user_workflow_dir(user)
         file_path = os.path.join(user_dir, clean_name)
@@ -231,9 +320,26 @@ async def save_workflow(request, name_override: str | None = None):
 async def get_workflow_content(request, name: str):
     user = get_current_user(request)
 
+    # Shared template load (read-only open)
+    if _is_shared_template_name(name):
+        rel = sanitize_name(_strip_template_prefix(name))
+        if not rel:
+            return web.Response(status=404)
+        tdir = get_shared_templates_dir()
+        tpath = os.path.join(tdir, rel)
+        if os.path.isfile(tpath):
+            return web.FileResponse(tpath)
+        return web.Response(status=404, text="Template not found")
+
     clean_name = sanitize_name(name)
     if not clean_name:
         return web.Response(status=404)
+
+    # Shared by bare name under Templates/
+    tdir = get_shared_templates_dir()
+    tpath = os.path.join(tdir, clean_name)
+    if os.path.isfile(tpath):
+        return web.FileResponse(tpath)
 
     # First: user-specific workflow
     user_dir = user_env.get_user_workflow_dir(user)
@@ -260,9 +366,26 @@ async def delete_workflow(request, name: str | None):
     if not name:
         name = request.query.get("name", "")
 
+    if _is_shared_template_name(name):
+        return web.json_response(
+            {
+                "error": "Shared templates cannot be deleted from the UI. Remove files from custom_nodes/Templates on the server.",
+                "code": "TEMPLATE_READ_ONLY",
+            },
+            status=403,
+        )
+
     clean_name = sanitize_name(name)
     if not clean_name:
         return web.Response(status=400, text="Invalid filename")
+
+    # Block delete if name maps to shared template
+    tpath = os.path.join(get_shared_templates_dir(), clean_name)
+    if os.path.isfile(tpath):
+        return web.json_response(
+            {"error": "Shared templates are read-only", "code": "TEMPLATE_READ_ONLY"},
+            status=403,
+        )
 
     # --- 1. Try deleting from the user's own folder ---
     user_dir = user_env.get_user_workflow_dir(user)
