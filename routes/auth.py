@@ -29,6 +29,18 @@ async def post_register(request: web.Request) -> web.Response:
     username = sanitized_data.get("username")
     password = sanitized_data.get("password")
 
+    is_timed_out, failed_attempts, remaining_seconds = timeout.check_is_timed_out(ip)
+    if is_timed_out:
+        return web.json_response(
+            {
+                "error": "Too many failed attempts. Please wait.",
+                "failed_attempts": failed_attempts,
+                "remaining_seconds": remaining_seconds,
+                "code": "RATE_LIMIT",
+            },
+            status=429,
+        )
+
     admin_user = users_db.get_admin_user()
     is_first_admin = (admin_user[0] is None)
 
@@ -73,15 +85,41 @@ async def get_login(request: web.Request) -> web.Response:
     path = os.path.join(HTML_DIR, "login.html")
     return web.FileResponse(path) if os.path.exists(path) else web.Response(text="login.html not found", status=404)
 
+
+@routes.get("/change_password")
+async def get_change_password(request: web.Request) -> web.Response:
+    path = os.path.join(HTML_DIR, "change_password.html")
+    return (
+        web.FileResponse(path)
+        if os.path.exists(path)
+        else web.Response(text="change_password.html not found", status=404)
+    )
+
 @routes.post("/login")
 async def post_login(request: web.Request) -> web.Response:
     sanitized_data = request.get("_sanitized_data", {})
     ip = get_ip(request)
+
+    # Server-side rate limit (in addition to client + IP blacklist)
+    is_timed_out, failed_attempts, remaining_seconds = timeout.check_is_timed_out(ip)
+    if is_timed_out:
+        return web.json_response(
+            {
+                "error": "Too many failed attempts. Please wait.",
+                "failed_attempts": failed_attempts,
+                "remaining_seconds": remaining_seconds,
+                "code": "RATE_LIMIT",
+            },
+            status=429,
+        )
     
     if str(sanitized_data.get("guest_login", "false")).lower() == "true":
         ensure_guest_user()
-        guest_id, _ = users_db.get_user("guest")
-        if not guest_id: return web.json_response({"error": "Guest disabled"}, status=500)
+        guest_id, guest_rec = users_db.get_user("guest")
+        if not guest_id:
+            return web.json_response({"error": "Guest disabled"}, status=500)
+        if guest_rec.get("disabled"):
+            return web.json_response({"error": "Guest account is disabled"}, status=403)
         
         user_env.get_user_workflow_dir("guest")
         
@@ -91,12 +129,23 @@ async def post_login(request: web.Request) -> web.Response:
         resp.set_cookie("jwt_token", token, httponly=True, samesite="Strict")
         logger.login_success(ip, "guest")
         timeout.remove_failed_attempts(ip)
+        try:
+            from ..utils.presence import touch
+            touch("guest")
+        except Exception:
+            pass
         return resp
 
     login_id = sanitized_data.get("username")  # username OR email
     password = sanitized_data.get("password")
 
     user_id, user_rec = users_db.authenticate(login_id, password)
+    if user_rec and user_rec.get("_disabled") and not user_id:
+        timeout.add_failed_attempt(ip)
+        return web.json_response(
+            {"error": "Account disabled. Contact an administrator.", "code": "DISABLED"},
+            status=403,
+        )
     if user_id and user_rec:
         username = user_rec.get("username") or login_id
 
@@ -104,21 +153,97 @@ async def post_login(request: web.Request) -> web.Response:
 
         token = jwt_auth.create_access_token({"id": user_id, "username": username})
         sync_user_to_comfy_manager(user_id, username)
+        must_change = bool(user_rec.get("must_change_password"))
         resp = web.json_response(
             {
                 "message": "Login successful",
                 "jwt_token": token,
                 "username": username,
                 "email": user_rec.get("email"),
+                "must_change_password": must_change,
             }
         )
         resp.set_cookie("jwt_token", token, httponly=True, samesite="Strict")
         logger.login_success(ip, username)
         timeout.remove_failed_attempts(ip)
+        try:
+            from ..utils.presence import touch
+            touch(username)
+            from ..utils.audit_log import audit
+            audit("login", actor=username, ip=ip, detail="User logged in")
+        except Exception:
+            pass
         return resp
 
     timeout.add_failed_attempt(ip)
-    return web.json_response({"error": "Invalid credentials"}, status=401)
+    fa = timeout.get_failed_attempts(ip)
+    _, _, rem = timeout.check_is_timed_out(ip)
+    return web.json_response(
+        {
+            "error": "Invalid credentials",
+            "failed_attempts": fa,
+            "remaining_seconds": rem or None,
+        },
+        status=401,
+    )
+
+
+@routes.post("/usgromana/api/change-password")
+async def api_change_password(request: web.Request) -> web.Response:
+    """Logged-in user changes own password (also clears must_change_password)."""
+    token = jwt_auth.get_token_from_request(request)
+    if not token:
+        return web.json_response({"error": "Authentication required"}, status=401)
+    try:
+        payload = jwt_auth.decode_access_token(token)
+        username = payload.get("username")
+    except Exception:
+        return web.json_response({"error": "Invalid token"}, status=401)
+
+    try:
+        data = await request.json()
+    except Exception:
+        data = request.get("_sanitized_data") or {}
+
+    current = data.get("current_password") or data.get("old_password") or ""
+    new_pw = data.get("new_password") or data.get("password")
+    if new_pw is None:
+        return web.json_response({"error": "Missing new_password"}, status=400)
+
+    # If forced change, still verify they know the temp password unless skip_current
+    must = False
+    _, rec = users_db.get_user(username=username)
+    if rec:
+        must = bool(rec.get("must_change_password"))
+
+    if not must:
+        uid, _ = users_db.authenticate(username, current)
+        if not uid:
+            return web.json_response({"error": "Current password incorrect"}, status=403)
+    else:
+        # Allow change with current temp password
+        if current:
+            uid, auth_rec = users_db.authenticate(username, current)
+            if not uid and not (auth_rec or {}).get("_disabled"):
+                return web.json_response({"error": "Current password incorrect"}, status=403)
+
+    ok = users_db.set_password(username, str(new_pw), force_change=False)
+    if not ok:
+        return web.json_response({"error": "Failed to update password"}, status=500)
+    users_db.clear_must_change_password(username)
+    try:
+        from ..utils.audit_log import audit
+        from ..utils.ip_filter import get_ip as _get_ip
+        audit(
+            "password_change_self",
+            actor=username,
+            target=username,
+            ip=_get_ip(request),
+            detail="User changed own password",
+        )
+    except Exception:
+        pass
+    return web.json_response({"status": "ok", "message": "Password updated"})
 
 @routes.get("/generate_token")
 async def get_generate_token(request: web.Request) -> web.Response:

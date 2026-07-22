@@ -128,6 +128,42 @@ function formatQueueMessage(workflowName, username, data) {
     return msg;
 }
 
+let queueBadgeEl = null;
+
+function ensureQueueBadge() {
+    if (queueBadgeEl && document.body.contains(queueBadgeEl)) return queueBadgeEl;
+    queueBadgeEl = document.createElement("div");
+    queueBadgeEl.id = "usgromana-queue-badge";
+    queueBadgeEl.style.cssText =
+        "position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:99991;" +
+        "background:linear-gradient(135deg,rgba(40,80,160,0.95),rgba(20,40,90,0.95));" +
+        "color:#e8f0ff;border:1px solid rgba(120,170,255,0.5);padding:6px 14px;" +
+        "border-radius:999px;font:12px/1.3 system-ui,sans-serif;font-weight:600;" +
+        "box-shadow:0 4px 16px rgba(0,0,0,0.35);display:none;pointer-events:none;" +
+        "backdrop-filter:blur(8px);";
+    document.body.appendChild(queueBadgeEl);
+    return queueBadgeEl;
+}
+
+function updateQueueBadge(qStatus) {
+    const badge = ensureQueueBadge();
+    if (!qStatus || !qStatus.active) {
+        badge.style.display = "none";
+        badge.textContent = "";
+        return;
+    }
+    const wait = qStatus.waiting_number;
+    const active = qStatus.active;
+    const max = qStatus.max_jobs;
+    const unlimited = qStatus.unlimited;
+    let text = wait != null ? `Queue position #${wait}` : "In queue";
+    if (qStatus.jobs_ahead > 0) text += ` · ${qStatus.jobs_ahead} ahead`;
+    else if (qStatus.jobs_ahead === 0 && qStatus.running > 0) text += " · running";
+    if (!unlimited && max > 0) text += ` · slots ${active}/${max}`;
+    badge.textContent = text;
+    badge.style.display = "block";
+}
+
 function ensureStatusBar() {
     if (statusEl && document.body.contains(statusEl)) return statusEl;
     statusEl = document.createElement("div");
@@ -267,6 +303,44 @@ function notifyNewJobs(activeList) {
     }
 }
 
+function annotateComfyQueueUsernames(activeList) {
+    if (!canReceiveLiveJobAlerts()) return;
+    const active = Array.isArray(activeList) ? activeList : [];
+    if (!active.length) return;
+    // Best-effort: label queue sidebar items with username for admin/power
+    try {
+        const labels = document.querySelectorAll(
+            ".comfy-queue-item, .queue-item, [class*='queue'] [class*='item'], .p-treenode-label"
+        );
+        // Map by short job id fragment
+        const byId = {};
+        for (const r of active) {
+            const id = String(r.prompt_id || r.job_id || "");
+            if (id) byId[id] = r;
+            if (id.length > 8) byId[id.slice(0, 8)] = r;
+        }
+        labels.forEach((el) => {
+            if (el.dataset.usgromanaNamed) return;
+            const text = el.textContent || "";
+            for (const [frag, r] of Object.entries(byId)) {
+                if (frag.length >= 6 && text.includes(frag)) {
+                    const who = r.username || "?";
+                    if (!text.includes(`[${who}]`)) {
+                        el.insertAdjacentHTML(
+                            "beforeend",
+                            ` <span style="opacity:.75;font-size:11px;color:#8ec5ff;">[${who}]</span>`
+                        );
+                    }
+                    el.dataset.usgromanaNamed = "1";
+                    break;
+                }
+            }
+        });
+    } catch {
+        /* ignore DOM differences across Comfy versions */
+    }
+}
+
 async function pollActive() {
     try {
         const [activeRes, statusRes] = await Promise.all([
@@ -277,6 +351,8 @@ async function pollActive() {
         const qStatus = statusRes.ok ? await statusRes.json() : null;
         notifyNewJobs(data.active || []);
         renderActiveBar(data, qStatus);
+        updateQueueBadge(qStatus);
+        annotateComfyQueueUsernames(data.active || []);
     } catch {
         /* ignore */
     }

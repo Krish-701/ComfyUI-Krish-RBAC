@@ -131,6 +131,8 @@ async def api_users(request):
             "is_admin": u.get("admin", False),
             # NEW: per-user SFW flag; default = True (SFW enabled)
             "sfw_check": u.get("sfw_check", True),
+            "disabled": bool(u.get("disabled")),
+            "must_change_password": bool(u.get("must_change_password")),
         })
     return web.json_response({"users": users_list})
 
@@ -311,7 +313,21 @@ async def api_update_user_route(request):
 
     success = patch_user_group(target, groups, is_admin_flag, sfw_check)
     if success:
-        logger.info(f"[Audit] user updated: target={target} by {_admin_username(request)}")
+        actor = _admin_username(request)
+        logger.info(f"[Audit] user updated: target={target} by {actor}")
+        try:
+            from ..utils.audit_log import audit
+            from ..utils.ip_filter import get_ip
+            audit(
+                "user_role_update",
+                actor=actor,
+                target=target,
+                detail=f"groups={groups} sfw={sfw_check}",
+                meta={"groups": groups, "sfw_check": sfw_check},
+                ip=get_ip(request),
+            )
+        except Exception:
+            pass
         return web.json_response({"status": "ok"})
     return web.Response(status=404)
 
@@ -320,7 +336,8 @@ async def api_update_user_route(request):
 async def api_reset_user_password(request):
     """
     Admin-only: set / reset a user's password.
-    Body: { "password": "NewPass123!" }
+    Body: { "password": "...", "force_change": true }
+    force_change (default true): user must change password after next login.
     """
     if not is_admin(request):
         return web.json_response({"error": "Admin only"}, status=403)
@@ -345,24 +362,76 @@ async def api_reset_user_password(request):
     if not isinstance(new_password, str):
         new_password = str(new_password)
 
+    force_change = data.get("force_change", True)
+    if isinstance(force_change, str):
+        force_change = force_change.strip().lower() in ("1", "true", "yes")
+
     uid, rec = users_db.get_user(username=target)
     if not uid or not rec:
         return web.json_response({"error": "User not found"}, status=404)
 
-    ok = users_db.set_password(target, new_password)
+    ok = users_db.set_password(target, new_password, force_change=bool(force_change))
     if not ok:
         return web.json_response({"error": "Failed to update password"}, status=500)
 
-    logger.info(
-        f"[Audit] password reset: target={target} by {_admin_username(request)}"
-    )
+    actor = _admin_username(request)
+    logger.info(f"[Audit] password reset: target={target} by {actor}")
+    try:
+        from ..utils.audit_log import audit
+        from ..utils.ip_filter import get_ip
+        audit(
+            "password_reset",
+            actor=actor,
+            target=target,
+            detail=f"force_change={bool(force_change)}",
+            meta={"force_change": bool(force_change)},
+            ip=get_ip(request),
+        )
+    except Exception:
+        pass
     return web.json_response(
         {
             "status": "ok",
             "message": f"Password updated for {rec.get('username') or target}",
             "username": rec.get("username") or target,
+            "force_change": bool(force_change),
         }
     )
+
+
+@routes.put("/usgromana/api/users/{target_user}/disabled")
+async def api_set_user_disabled(request):
+    """Admin-only soft ban: disable/enable account without deleting."""
+    if not is_admin(request):
+        return web.json_response({"error": "Admin only"}, status=403)
+    target = request.match_info["target_user"]
+    if not target or target.lower() == "guest":
+        return web.json_response({"error": "Cannot disable guest this way"}, status=400)
+    if target == _admin_username(request):
+        return web.json_response({"error": "Cannot disable yourself"}, status=400)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    disabled = bool(data.get("disabled", True))
+    ok = users_db.set_disabled(target, disabled)
+    if not ok:
+        return web.json_response({"error": "User not found or cannot disable"}, status=404)
+    actor = _admin_username(request)
+    try:
+        from ..utils.audit_log import audit
+        from ..utils.ip_filter import get_ip
+        audit(
+            "user_disable" if disabled else "user_enable",
+            actor=actor,
+            target=target,
+            detail="disabled" if disabled else "enabled",
+            ip=get_ip(request),
+        )
+    except Exception:
+        pass
+    logger.info(f"[Audit] user {'disabled' if disabled else 'enabled'}: {target} by {actor}")
+    return web.json_response({"status": "ok", "username": target, "disabled": disabled})
 
 
 @routes.delete("/usgromana/api/users/{target_user}")
@@ -374,7 +443,14 @@ async def api_delete_user_route(request):
     result = delete_user_record(target)
     if result == "last_admin": return web.json_response({"error": "Cannot delete last admin"}, status=400)
     if result is False: return web.Response(status=404)
-    logger.info(f"[Audit] user deleted: target={target} by {_admin_username(request)}")
+    actor = _admin_username(request)
+    logger.info(f"[Audit] user deleted: target={target} by {actor}")
+    try:
+        from ..utils.audit_log import audit
+        from ..utils.ip_filter import get_ip
+        audit("user_delete", actor=actor, target=target, ip=get_ip(request), detail="User deleted")
+    except Exception:
+        pass
     return web.json_response({"status": "ok"})
 
 @routes.get("/usgromana/api/ip-lists")
@@ -686,10 +762,23 @@ async def api_workflow_runs_clear(request):
 
         filter_user = (request.rel_url.query.get("user") or "").strip() or None
         removed = get_run_log().clear(username=filter_user)
+        actor = _admin_username(request)
         logger.info(
-            f"[Audit] Workflow run log cleared by {_admin_username(request)} "
+            f"[Audit] Workflow run log cleared by {actor} "
             f"(user={filter_user or 'ALL'}, removed={removed})"
         )
+        try:
+            from ..utils.audit_log import audit
+            from ..utils.ip_filter import get_ip
+            audit(
+                "run_log_clear",
+                actor=actor,
+                target=filter_user or "ALL",
+                detail=f"removed={removed}",
+                ip=get_ip(request),
+            )
+        except Exception:
+            pass
         return web.json_response({"status": "ok", "removed": removed})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -774,11 +863,182 @@ async def api_queue_status(request):
 
     try:
         from ..globals import access_control
+        from ..utils.presence import touch
 
+        touch(username)
         status = access_control.get_user_queue_status(user_id)
         status["viewer"] = username
         status["role"] = role
         status["is_admin"] = admin
+        status["can_view_all_runs"] = can_view_all
         return web.json_response(status)
     except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.post("/usgromana/api/queue/cancel")
+async def api_queue_cancel(request):
+    """
+    Cancel a pending or running job by prompt_id.
+    Admin/power can cancel any user's job; others only their own.
+    """
+    username, user_id, admin, role, can_view_all = _caller_identity(request)
+    if not username:
+        return web.json_response({"error": "Authentication required"}, status=401)
+
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    prompt_id = data.get("prompt_id") or data.get("job_id")
+    if not prompt_id:
+        return web.json_response({"error": "Missing prompt_id"}, status=400)
+
+    try:
+        from ..globals import access_control
+        from ..utils.audit_log import audit
+        from ..utils.ip_filter import get_ip
+
+        # Ensure JWT user is bound for ownership checks
+        if user_id:
+            access_control.set_current_user_id(user_id, set_fallback=False)
+
+        result = access_control.cancel_job_by_prompt_id(
+            str(prompt_id), actor_can_view_all=can_view_all
+        )
+        if not result.get("ok"):
+            status = 404 if result.get("code") == "NOT_FOUND" else 403
+            return web.json_response(result, status=status)
+
+        audit(
+            "queue_cancel",
+            actor=username,
+            target=result.get("username") or "",
+            detail=(
+                f"cancelled {result.get('cancelled')} job {prompt_id} "
+                f"({result.get('workflow_name')})"
+            ),
+            meta=result,
+            ip=get_ip(request),
+        )
+        logger.info(
+            f"[Audit] queue cancel: prompt_id={prompt_id} target={result.get('username')} "
+            f"by {username} ({result.get('cancelled')})"
+        )
+        return web.json_response({"status": "ok", **result})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.get("/usgromana/api/audit-log")
+async def api_audit_log(request):
+    """Admin-only structured audit log."""
+    if not is_admin(request):
+        return web.json_response({"error": "Admin only"}, status=403)
+    try:
+        from ..utils.audit_log import get_audit_log
+
+        q = request.rel_url.query
+        result = get_audit_log().list_entries(
+            limit=int(q.get("limit", "200")),
+            offset=int(q.get("offset", "0")),
+            action=(q.get("action") or "").strip() or None,
+            actor=(q.get("actor") or "").strip() or None,
+            search=(q.get("q") or q.get("search") or "").strip() or None,
+        )
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.get("/usgromana/api/audit-log/export")
+async def api_audit_log_export(request):
+    """Admin-only CSV export of audit log."""
+    if not is_admin(request):
+        return web.json_response({"error": "Admin only"}, status=403)
+    try:
+        from ..utils.audit_log import get_audit_log
+        from datetime import datetime, timezone
+
+        q = request.rel_url.query
+        csv_text = get_audit_log().export_csv(
+            action=(q.get("action") or "").strip() or None,
+            actor=(q.get("actor") or "").strip() or None,
+            search=(q.get("q") or "").strip() or None,
+        )
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        return web.Response(
+            text=csv_text,
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="audit_log_{stamp}.csv"',
+            },
+        )
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.get("/usgromana/api/dashboard")
+async def api_dashboard(request):
+    """
+    Admin dashboard stats: online users, queue length, jobs/hour, top users.
+    """
+    if not is_admin(request):
+        return web.json_response({"error": "Admin only"}, status=403)
+    try:
+        from ..globals import access_control
+        from ..utils.presence import list_online
+        from ..utils.workflow_run_log import get_run_log
+        import time
+
+        online = list_online()
+        active = access_control.get_active_runs_snapshot()
+        running = [a for a in active if a.get("status") == "running"]
+        pending = [a for a in active if a.get("status") == "queued"]
+
+        # Jobs in last hour from run log
+        now = time.time()
+        hour_ago = now - 3600
+        runs = get_run_log().export_runs(limit=5000)
+        last_hour = [
+            r
+            for r in runs
+            if isinstance(r.get("started_ts"), (int, float)) and r["started_ts"] >= hour_ago
+        ]
+        # Fallback if no started_ts
+        if not last_hour:
+            last_hour = [r for r in runs[:50]]  # approximate
+
+        by_user: dict[str, int] = {}
+        for r in last_hour:
+            u = r.get("username") or "unknown"
+            by_user[u] = by_user.get(u, 0) + 1
+        top_users = sorted(
+            [{"username": k, "jobs": v} for k, v in by_user.items()],
+            key=lambda x: x["jobs"],
+            reverse=True,
+        )[:15]
+
+        stats = get_run_log().stats()
+
+        return web.json_response(
+            {
+                "online_users": online,
+                "online_count": len(online),
+                "queue_length": len(active),
+                "running": len(running),
+                "pending": len(pending),
+                "active_jobs": active,
+                "jobs_last_hour": len(last_hour),
+                "top_users_hour": top_users,
+                "total_runs_all_time": stats.get("total_runs", 0),
+                "users_all_time": stats.get("users") or [],
+            }
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return web.json_response({"error": str(e)}, status=500)

@@ -14,7 +14,7 @@ let groupsConfig = {};
  */
 window.UsgromanaAdminTabs = {
     _tabs: [],
-    _defaultOrder: ["users", "perms", "ui-defaults", "ip", "env", "runs", "nsfw"],
+    _defaultOrder: ["dashboard", "users", "perms", "ui-defaults", "ip", "env", "runs", "audit", "nsfw"],
     
     /**
      * Register a new tab in the admin panel.
@@ -749,22 +749,30 @@ class usgromanaDialog extends ComfyDialog {
         // Build tabs HTML (built-in tabs first, then extension tabs)
         const builtInTabs = fullAdmin
             ? [
-                { id: "users", label: "Users & Roles", order: 0 },
-                { id: "perms", label: "Permissions", order: 1 },
-                { id: "ui-defaults", label: "Default UI", order: 2 },
-                { id: "ip", label: "IP Rules", order: 3 },
-                { id: "env", label: "User Env", order: 4 },
-                { id: "runs", label: "Run Log", order: 5 },
-                { id: "nsfw", label: "NSFW Management", order: 6 }
+                { id: "dashboard", label: "Dashboard", order: 0 },
+                { id: "users", label: "Users & Roles", order: 1 },
+                { id: "perms", label: "Permissions", order: 2 },
+                { id: "ui-defaults", label: "Default UI", order: 3 },
+                { id: "ip", label: "IP Rules", order: 4 },
+                { id: "env", label: "User Env", order: 5 },
+                { id: "runs", label: "Run Log", order: 6 },
+                { id: "queue", label: "Live Queue", order: 7 },
+                { id: "audit", label: "Audit Log", order: 8 },
+                { id: "nsfw", label: "NSFW Management", order: 9 }
             ]
+            : canViewAllRuns
+            ? [
+                { id: "runs", label: "Run Log (All Users)", order: 0 },
+                { id: "queue", label: "Live Queue", order: 1 }
+              ]
             : [
-                { id: "runs", label: canViewAllRuns ? "Run Log (All Users)" : "My Run Log", order: 0 }
+                { id: "runs", label: "My Run Log", order: 0 }
             ];
         
         // Combine and sort all tabs
         const allTabs = [...builtInTabs, ...extensionTabs.map(t => ({ id: t.id, label: t.label, order: t.order }))];
         allTabs.sort((a, b) => a.order - b.order);
-        const defaultTabId = fullAdmin ? "users" : "runs";
+        const defaultTabId = fullAdmin ? "dashboard" : "runs";
         
         // Build tabs HTML - mark default tab as active
         // Escape tab.label to prevent XSS (tab.id is already validated during registration)
@@ -785,8 +793,8 @@ class usgromanaDialog extends ComfyDialog {
         
         // Render Layout
         const title = fullAdmin
-            ? "Usgromana Security Policy"
-            : (canViewAllRuns ? "Workflow Run Log" : "My Workflow Runs");
+            ? "Krish RBAC · Security Policy"
+            : (canViewAllRuns ? "Krish RBAC · Run Log & Queue" : "Krish RBAC · My Runs");
         this.element.innerHTML = `
             <div class="usgromana-modal-header">
                 <span class="usgromana-modal-title">${escapeHtml(title)}</span>
@@ -822,14 +830,19 @@ class usgromanaDialog extends ComfyDialog {
 
         // Fill Data - Built-in tabs (admin-only tabs skip for power/user)
         if (fullAdmin) {
+            await this.renderDashboard(this.element.querySelector("#usgromana-tab-dashboard"));
             this.renderUsers(usersList, this.element.querySelector("#usgromana-tab-users"));
             this.renderPerms(this.element.querySelector("#usgromana-tab-perms"));
             await this.renderIpRules(this.element.querySelector("#usgromana-tab-ip"));
             this.renderUserEnv(this.element.querySelector("#usgromana-tab-env"), usersList);
             await this.renderUiDefaults(this.element.querySelector("#usgromana-tab-ui-defaults"));
+            await this.renderAuditLog(this.element.querySelector("#usgromana-tab-audit"));
             this.renderNsfwManagement(this.element.querySelector("#usgromana-tab-nsfw"));
         }
         await this.renderRunLog(this.element.querySelector("#usgromana-tab-runs"), usersList);
+        if (fullAdmin || canViewAllRuns) {
+            await this.renderLiveQueue(this.element.querySelector("#usgromana-tab-queue"));
+        }
         
         // Fill Data - Extension tabs
         const context = {
@@ -963,8 +976,13 @@ renderUsers(list, container) {
             `;
         }
 
-        // Don't allow deleting yourself or the guest account
+        const isDisabled = !!u.disabled;
         if (!isSelf && !isGuest) {
+            actionsHtml += `
+                <button class="usgromana-btn secondary btn-disable" data-user="${uname}" data-disabled="${isDisabled ? "1" : "0"}">
+                    ${isDisabled ? "Enable" : "Disable"}
+                </button>
+            `;
             actionsHtml += `
                 <button class="usgromana-btn usgromana-btn-danger btn-delete" data-user="${uname}">
                     Delete
@@ -973,8 +991,8 @@ renderUsers(list, container) {
         }
 
         html += `
-            <tr>
-                <td><strong>${escapeHtml(uname)}</strong></td>
+            <tr style="${isDisabled ? "opacity:0.55;" : ""}">
+                <td><strong>${escapeHtml(uname)}</strong>${isDisabled ? ' <span style="color:#ff6b6b;font-size:11px;">(disabled)</span>' : ""}${u.must_change_password ? ' <span style="color:#e0c35a;font-size:11px;">(must change PW)</span>' : ""}</td>
                 <td style="opacity:.9;font-size:12px;">${email ? escapeHtml(email) : "—"}</td>
                 <td>
                     <select
@@ -1139,15 +1157,14 @@ renderUsers(list, container) {
         };
     });
 
-    // --- Reset password ---
+    // --- Reset password (force change on next login by default) ---
     container.querySelectorAll(".btn-reset-pw").forEach(btn => {
         btn.onclick = async () => {
             const u = btn.dataset.user;
             const pw = window.prompt(
-                `Reset password for "${u}"\n\nEnter a new password (any length / characters):`
+                `Reset password for "${u}"\n\nEnter a new temporary password:`
             );
             if (pw === null) return;
-            // No restrictions — use exactly what the admin typed (do not strip)
             const password = String(pw);
             const confirmPw = window.prompt(`Confirm new password for "${u}":`);
             if (confirmPw === null) return;
@@ -1155,6 +1172,9 @@ renderUsers(list, container) {
                 window.alert("Passwords do not match.");
                 return;
             }
+            const force = window.confirm(
+                "Force user to change this password on next login?\n\nOK = yes (recommended)\nCancel = no"
+            );
 
             btn.disabled = true;
             const originalText = btn.innerText;
@@ -1166,7 +1186,7 @@ renderUsers(list, container) {
                         method: "PUT",
                         credentials: "include",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ password }),
+                        body: JSON.stringify({ password, force_change: force }),
                     }
                 );
                 const data = await res.json().catch(() => ({}));
@@ -1176,17 +1196,50 @@ renderUsers(list, container) {
                     btn.innerText = originalText;
                     return;
                 }
-                window.alert(data.message || `Password updated for ${u}.`);
-                btn.innerText = "Done";
-                setTimeout(() => {
-                    btn.disabled = false;
-                    btn.innerText = originalText;
-                }, 1200);
+                window.alert(
+                    (data.message || `Password updated for ${u}.`) +
+                    (force ? "\nThey must change it on next login." : "")
+                );
+                const usersData = await getData("/usgromana/api/users");
+                self.renderUsers(usersData?.users || [], container);
             } catch (e) {
                 console.error("[usgromana] password reset failed:", e);
                 window.alert("Unexpected error while resetting password.");
                 btn.disabled = false;
                 btn.innerText = originalText;
+            }
+        };
+    });
+
+    // --- Disable / enable (soft ban) ---
+    container.querySelectorAll(".btn-disable").forEach(btn => {
+        btn.onclick = async () => {
+            const u = btn.dataset.user;
+            const currentlyDisabled = btn.dataset.disabled === "1";
+            const next = !currentlyDisabled;
+            if (!window.confirm(next
+                ? `Disable account "${u}"? They cannot log in until re-enabled.`
+                : `Enable account "${u}" again?`)) return;
+            try {
+                const res = await fetch(
+                    `/usgromana/api/users/${encodeURIComponent(u)}/disabled`,
+                    {
+                        method: "PUT",
+                        credentials: "include",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ disabled: next }),
+                    }
+                );
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    alert(data.error || `Failed (${res.status})`);
+                    return;
+                }
+                const usersData = await getData("/usgromana/api/users");
+                self.renderUsers(usersData?.users || [], container);
+            } catch (e) {
+                console.error("[usgromana] disable failed:", e);
+                alert("Failed to update account status.");
             }
         };
     });
@@ -1717,6 +1770,210 @@ renderUserEnv(container, usersList) {
     if (users.length > 0) {
         refreshStatus();
     }
+}
+
+async renderDashboard(container) {
+    if (!container) return;
+    container.innerHTML = `<div class="usgromana-section"><p>Loading dashboard…</p></div>`;
+    const load = async () => {
+        try {
+            const res = await fetch("/usgromana/api/dashboard", { credentials: "include" });
+            const d = res.ok ? await res.json() : {};
+            if (!res.ok) {
+                container.innerHTML = `<div class="usgromana-section" style="color:#ff6b6b;">${escapeHtml(d.error || "Failed to load")}</div>`;
+                return;
+            }
+            const online = d.online_users || [];
+            const top = d.top_users_hour || [];
+            const active = d.active_jobs || [];
+            container.innerHTML = `
+                <div class="usgromana-section">
+                    <h3>Krish RBAC Dashboard</h3>
+                    <div style="display:flex;flex-wrap:wrap;gap:10px;margin:12px 0;">
+                        <div style="padding:12px 16px;border-radius:10px;background:rgba(255,255,255,0.05);min-width:120px;">
+                            <div style="font-size:11px;opacity:.7;">Online</div>
+                            <div style="font-size:22px;font-weight:700;">${d.online_count || 0}</div>
+                        </div>
+                        <div style="padding:12px 16px;border-radius:10px;background:rgba(255,255,255,0.05);min-width:120px;">
+                            <div style="font-size:11px;opacity:.7;">Queue (all)</div>
+                            <div style="font-size:22px;font-weight:700;">${d.queue_length || 0}</div>
+                        </div>
+                        <div style="padding:12px 16px;border-radius:10px;background:rgba(255,255,255,0.05);min-width:120px;">
+                            <div style="font-size:11px;opacity:.7;">Running</div>
+                            <div style="font-size:22px;font-weight:700;color:#6eb6ff;">${d.running || 0}</div>
+                        </div>
+                        <div style="padding:12px 16px;border-radius:10px;background:rgba(255,255,255,0.05);min-width:120px;">
+                            <div style="font-size:11px;opacity:.7;">Pending</div>
+                            <div style="font-size:22px;font-weight:700;color:#e0c35a;">${d.pending || 0}</div>
+                        </div>
+                        <div style="padding:12px 16px;border-radius:10px;background:rgba(255,255,255,0.05);min-width:120px;">
+                            <div style="font-size:11px;opacity:.7;">Jobs / last hour</div>
+                            <div style="font-size:22px;font-weight:700;">${d.jobs_last_hour || 0}</div>
+                        </div>
+                        <div style="padding:12px 16px;border-radius:10px;background:rgba(255,255,255,0.05);min-width:120px;">
+                            <div style="font-size:11px;opacity:.7;">All-time runs</div>
+                            <div style="font-size:22px;font-weight:700;">${d.total_runs_all_time || 0}</div>
+                        </div>
+                    </div>
+                    <div class="usgromana-row" style="gap:16px;align-items:flex-start;flex-wrap:wrap;">
+                        <div style="flex:1;min-width:200px;">
+                            <h4>Online users</h4>
+                            <ul style="margin:6px 0 0 16px;padding:0;">
+                                ${online.length ? online.map(u => `<li><b>${escapeHtml(u.username)}</b> <span style="opacity:.6;font-size:11px;">${u.seconds_ago}s ago</span></li>`).join("") : "<li style='opacity:.6;'>Nobody active in last 2 min</li>"}
+                            </ul>
+                        </div>
+                        <div style="flex:1;min-width:200px;">
+                            <h4>Top users (last hour)</h4>
+                            <ul style="margin:6px 0 0 16px;padding:0;">
+                                ${top.length ? top.map(u => `<li><b>${escapeHtml(u.username)}</b> — ${u.jobs} job(s)</li>`).join("") : "<li style='opacity:.6;'>No jobs yet</li>"}
+                            </ul>
+                        </div>
+                        <div style="flex:1;min-width:220px;">
+                            <h4>Active now</h4>
+                            <ul style="margin:6px 0 0 16px;padding:0;font-size:12px;">
+                                ${active.length ? active.slice(0, 12).map(r => `<li>${r.status === "running" ? "▶" : "…"} <b>${escapeHtml(r.username || "?")}</b> — ${escapeHtml(r.workflow_name || "")}</li>`).join("") : "<li style='opacity:.6;'>Queue empty</li>"}
+                            </ul>
+                        </div>
+                    </div>
+                    <button class="usgromana-btn secondary" id="usgromana-dash-refresh" style="margin-top:12px;">Refresh</button>
+                </div>`;
+            container.querySelector("#usgromana-dash-refresh").onclick = () => load();
+        } catch (e) {
+            console.error(e);
+            container.innerHTML = `<div class="usgromana-section" style="color:#ff6b6b;">Dashboard error</div>`;
+        }
+    };
+    await load();
+}
+
+async renderAuditLog(container) {
+    if (!container) return;
+    container.innerHTML = `
+        <div class="usgromana-section">
+            <h3>Audit Log</h3>
+            <p>Who changed roles, reset passwords, cancelled jobs, cleared logs, etc.</p>
+            <div class="usgromana-row" style="gap:8px;flex-wrap:wrap;align-items:flex-end;">
+                <div style="flex:1;min-width:180px;">
+                    <label class="usgromana-field-label">Search</label>
+                    <input type="search" id="usgromana-audit-q" class="usgromana-select" style="width:100%;padding:8px;" placeholder="actor, target, action…" />
+                </div>
+                <button class="usgromana-btn secondary" id="usgromana-audit-refresh">Refresh</button>
+                <button class="usgromana-btn secondary" id="usgromana-audit-export">Export CSV</button>
+            </div>
+            <div style="margin-top:12px;overflow:auto;max-height:420px;">
+                <table class="usgromana-table">
+                    <thead><tr><th>Time</th><th>Action</th><th>Actor</th><th>Target</th><th>Detail</th><th>IP</th></tr></thead>
+                    <tbody id="usgromana-audit-tbody"><tr><td colspan="6">Loading…</td></tr></tbody>
+                </table>
+            </div>
+            <small id="usgromana-audit-meta" class="usgromana-muted"></small>
+        </div>`;
+    const tbody = container.querySelector("#usgromana-audit-tbody");
+    const meta = container.querySelector("#usgromana-audit-meta");
+    const qInput = container.querySelector("#usgromana-audit-q");
+    const load = async () => {
+        const q = new URLSearchParams();
+        q.set("limit", "300");
+        if (qInput.value.trim()) q.set("q", qInput.value.trim());
+        try {
+            const res = await fetch(`/usgromana/api/audit-log?${q}`, { credentials: "include" });
+            const data = res.ok ? await res.json() : { entries: [] };
+            const rows = data.entries || [];
+            if (!rows.length) {
+                tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;opacity:.7;">No audit entries yet.</td></tr>`;
+            } else {
+                tbody.innerHTML = rows.map(e => `<tr>
+                    <td style="white-space:nowrap;font-size:11px;">${escapeHtml(e.ts || "")}</td>
+                    <td><code>${escapeHtml(e.action || "")}</code></td>
+                    <td><strong>${escapeHtml(e.actor || "")}</strong></td>
+                    <td>${escapeHtml(e.target || "—")}</td>
+                    <td style="font-size:12px;">${escapeHtml(e.detail || "")}</td>
+                    <td style="font-size:11px;opacity:.8;">${escapeHtml(e.ip || "")}</td>
+                </tr>`).join("");
+            }
+            meta.textContent = `Showing ${rows.length} of ${data.total || rows.length}`;
+        } catch (e) {
+            tbody.innerHTML = `<tr><td colspan="6" style="color:#ff6b6b;">Failed to load</td></tr>`;
+        }
+    };
+    container.querySelector("#usgromana-audit-refresh").onclick = () => load();
+    qInput.onkeydown = (e) => { if (e.key === "Enter") load(); };
+    container.querySelector("#usgromana-audit-export").onclick = async () => {
+        const q = new URLSearchParams();
+        if (qInput.value.trim()) q.set("q", qInput.value.trim());
+        const res = await fetch(`/usgromana/api/audit-log/export?${q}`, { credentials: "include" });
+        if (!res.ok) { alert("Export failed"); return; }
+        const blob = await res.blob();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "audit_log.csv";
+        a.click();
+        URL.revokeObjectURL(a.href);
+    };
+    await load();
+}
+
+async renderLiveQueue(container) {
+    if (!container) return;
+    container.innerHTML = `
+        <div class="usgromana-section">
+            <h3>Live Queue</h3>
+            <p>All users' jobs. Admin/power can <strong>cancel</strong> any pending or running job.</p>
+            <button class="usgromana-btn secondary" id="usgromana-lq-refresh">Refresh</button>
+            <div style="margin-top:12px;overflow:auto;max-height:480px;">
+                <table class="usgromana-table">
+                    <thead><tr><th>#</th><th>Status</th><th>User</th><th>Workflow</th><th>Job ID</th><th></th></tr></thead>
+                    <tbody id="usgromana-lq-tbody"><tr><td colspan="6">Loading…</td></tr></tbody>
+                </table>
+            </div>
+        </div>`;
+    const tbody = container.querySelector("#usgromana-lq-tbody");
+    const load = async () => {
+        try {
+            const res = await fetch("/usgromana/api/workflow-runs/active", { credentials: "include" });
+            const data = res.ok ? await res.json() : { active: [] };
+            const rows = data.active || [];
+            if (!rows.length) {
+                tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;opacity:.7;">Queue empty</td></tr>`;
+                return;
+            }
+            tbody.innerHTML = rows.map((r, i) => {
+                const jid = r.job_id || r.prompt_id || "";
+                return `<tr>
+                    <td>${i + 1}</td>
+                    <td style="font-weight:600;color:${r.status === "running" ? "#6eb6ff" : "#e0c35a"};">${escapeHtml(r.status || "")}</td>
+                    <td><strong>${escapeHtml(r.username || "?")}</strong></td>
+                    <td>${escapeHtml(r.workflow_name || "")}</td>
+                    <td><code style="font-size:11px;">${escapeHtml(String(jid).slice(0, 12))}${String(jid).length > 12 ? "…" : ""}</code></td>
+                    <td><button class="usgromana-btn usgromana-btn-danger btn-cancel-job" data-pid="${escapeHtml(String(jid))}">Cancel</button></td>
+                </tr>`;
+            }).join("");
+            tbody.querySelectorAll(".btn-cancel-job").forEach(btn => {
+                btn.onclick = async () => {
+                    const pid = btn.dataset.pid;
+                    if (!pid || !confirm(`Cancel job ${pid}?`)) return;
+                    btn.disabled = true;
+                    const res2 = await fetch("/usgromana/api/queue/cancel", {
+                        method: "POST",
+                        credentials: "include",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ prompt_id: pid }),
+                    });
+                    const d = await res2.json().catch(() => ({}));
+                    if (!res2.ok) {
+                        alert(d.error || "Cancel failed");
+                        btn.disabled = false;
+                        return;
+                    }
+                    await load();
+                };
+            });
+        } catch (e) {
+            tbody.innerHTML = `<tr><td colspan="6" style="color:#ff6b6b;">Failed to load queue</td></tr>`;
+        }
+    };
+    container.querySelector("#usgromana-lq-refresh").onclick = () => load();
+    await load();
 }
 
 async renderRunLog(container, usersList) {

@@ -221,12 +221,15 @@ class UsersDB:
         """
         Authenticate with username OR email + password.
         Returns (user_id, user_dict) on success, else (None, {}).
+        Disabled accounts never authenticate.
         """
         if not login or not password:
             return None, {}
         user_id, user_data = self.get_user(login)
         if not user_id or not user_data:
             return None, {}
+        if user_data.get("disabled"):
+            return None, {"_disabled": True}
         try:
             ok = bcrypt.checkpw(
                 password.encode("utf-8"), user_data["password"].encode("utf-8")
@@ -237,11 +240,18 @@ class UsersDB:
             return None, {}
         return user_id, user_data
 
-    def set_password(self, username: str, new_password: str) -> bool:
+    def set_password(
+        self,
+        username: str,
+        new_password: str,
+        *,
+        force_change: bool = False,
+    ) -> bool:
         """
         Reset a user's password by username (or email). Returns True on success.
+        If force_change=True, user must change password on next login.
         """
-        if not username or not new_password:
+        if username is None or new_password is None:
             return False
         user_id, user_data = self.get_user(username)
         if not user_id or not user_data:
@@ -249,9 +259,44 @@ class UsersDB:
         self.load_users()
         if user_id not in self.users:
             return False
-        self.users[user_id]["password"] = self.hash_password(new_password)
+        self.users[user_id]["password"] = self.hash_password(str(new_password))
+        if force_change:
+            self.users[user_id]["must_change_password"] = True
+        else:
+            self.users[user_id]["must_change_password"] = False
         self.save_users(self.users)
         return True
+
+    def clear_must_change_password(self, username: str) -> bool:
+        user_id, _ = self.get_user(username)
+        if not user_id:
+            return False
+        self.load_users()
+        if user_id not in self.users:
+            return False
+        self.users[user_id]["must_change_password"] = False
+        self.save_users(self.users)
+        return True
+
+    def set_disabled(self, username: str, disabled: bool) -> bool:
+        """Soft-ban: disable login without deleting the account."""
+        user_id, user_data = self.get_user(username)
+        if not user_id or not user_data:
+            return False
+        if (user_data.get("username") or "").lower() == "guest":
+            return False
+        self.load_users()
+        if user_id not in self.users:
+            return False
+        self.users[user_id]["disabled"] = bool(disabled)
+        self.save_users(self.users)
+        return True
+
+    def is_disabled(self, username: str = "", user_id: str = "") -> bool:
+        uid, rec = self.get_user(username=username, user_id=user_id)
+        if not rec:
+            return False
+        return bool(rec.get("disabled"))
 
     def get_admin_user(self) -> tuple[str | None, dict] | None:
         """

@@ -277,7 +277,7 @@ async function login(event) {
         if (!token) {
           addToast("Login succeeded but no token was returned", "error");
         } else {
-          let cookieString = `jwt_token=${token}; path=/; HttpOnly; SameSite=Strict`;
+          let cookieString = `jwt_token=${token}; path=/; SameSite=Strict`;
 
           if (window.location.protocol === "https:") {
             cookieString += "; Secure";
@@ -287,7 +287,11 @@ async function login(event) {
         }
 
         addToast(result.message || "Login successful", "success");
-        window.location.href = "/";
+        if (result.must_change_password) {
+          window.location.href = "/change_password";
+        } else {
+          window.location.href = "/";
+        }
       } else {
         usernameField.classList.add("error");
         passwordField.classList.add("error");

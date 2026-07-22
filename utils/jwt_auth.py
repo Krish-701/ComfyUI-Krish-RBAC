@@ -74,10 +74,41 @@ class JWTAuth:
                 user = self.decode_access_token(token)
                 user_id = user.get("id")
                 username = user.get("username")
-                if not user_id == self.users_db.get_user(username)[0]:
+                db_uid, rec = self.users_db.get_user(username=username)
+                if not user_id == db_uid:
                     raise ValueError(
                         f"User with username: {username} is not in the database"
                     )
+                if rec and rec.get("disabled"):
+                    return await handle_unauthorized_access(
+                        request, "/logout", message="Account disabled"
+                    )
+
+                # Force password change: only allow limited endpoints
+                if rec and rec.get("must_change_password"):
+                    path = request.path or ""
+                    allowed = (
+                        path in (
+                            "/logout",
+                            "/usgromana/api/change-password",
+                            "/usgromana/api/me",
+                            "/change_password",
+                        )
+                        or path.startswith("/usgromana/css")
+                        or path.startswith("/usgromana/js")
+                        or path.startswith("/usgromana/assets")
+                    )
+                    if not allowed:
+                        accept = request.headers.get("Accept", "")
+                        if "text/html" in accept:
+                            return web.HTTPFound("/change_password")
+                        return web.json_response(
+                            {
+                                "error": "Password change required",
+                                "code": "MUST_CHANGE_PASSWORD",
+                            },
+                            status=403,
+                        )
 
                 request["user_id"] = user_id
                 request["user"] = username

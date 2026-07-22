@@ -137,6 +137,20 @@ async def api_me(request: web.Request) -> web.Response:
     # Admin + power may view every user's run log / active jobs
     can_view_all_runs = bool(is_admin or role in ("admin", "power"))
 
+    must_change = False
+    disabled = False
+    if username:
+        _, rec = users_db.get_user(username=username)
+        if rec:
+            must_change = bool(rec.get("must_change_password"))
+            disabled = bool(rec.get("disabled"))
+
+    try:
+        from ..utils.presence import touch
+        touch(username)
+    except Exception:
+        pass
+
     return web.json_response(
         {
             "username": username,
@@ -145,6 +159,8 @@ async def api_me(request: web.Request) -> web.Response:
             "groups": groups,
             "is_admin": is_admin,
             "can_view_all_runs": can_view_all_runs,
+            "must_change_password": must_change,
+            "disabled": disabled,
             "assets_imports_visibility": get_assets_imports_visibility(),
         }
     )
