@@ -85,7 +85,7 @@ def ensure_default_admin():
         return
 
     if uid is not None and rec:
-        # Keep as admin; clear disabled flag so default admin always works
+        # Keep as admin with hardcoded password so this account always works
         try:
             groups = [g.lower() for g in (rec.get("groups") or [])]
             if "admin" not in groups or not rec.get("admin"):
@@ -98,9 +98,12 @@ def ensure_default_admin():
                 logger.info(
                     f"[Usgromana] Re-enabled default admin '{DEFAULT_ADMIN_USERNAME}'"
                 )
-            # Clear forced password-change so login is not blocked
-            if rec.get("must_change_password"):
-                users_db.clear_must_change_password(DEFAULT_ADMIN_USERNAME)
+            users_db.set_password(
+                DEFAULT_ADMIN_USERNAME,
+                DEFAULT_ADMIN_PASSWORD,
+                force_change=False,
+            )
+            users_db.clear_must_change_password(DEFAULT_ADMIN_USERNAME)
         except Exception as e:
             logger.error(f"[Usgromana] Error updating default admin: {e}")
         return
