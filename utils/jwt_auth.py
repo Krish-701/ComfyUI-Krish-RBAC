@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from .users_db import UsersDB
 from .access_control import AccessControl
 from .logger import Logger
+from .session_store import issue_session, validate_session, clear_session
 
 
 class JWTAuth:
@@ -34,18 +35,44 @@ class JWTAuth:
             return auth_header[len("Bearer ") :]
         return request.cookies.get("jwt_token")
 
-    def create_access_token(self, data: dict, expire_minutes=None) -> str:
-        """Create a JWT access token."""
+    def create_access_token(
+        self,
+        data: dict,
+        expire_minutes=None,
+        *,
+        single_session: bool = True,
+    ) -> str:
+        """
+        Create a JWT access token.
+
+        When single_session=True (default for web login), a new session id is
+        issued and any previous web login for that user stops working.
+        Set single_session=False for long-lived API tokens that should not
+        kick off interactive sessions (or pass token_type=\"api\").
+        """
         to_encode = data.copy()
         if not expire_minutes:
             expire_minutes = self.expire_minutes
         expire = datetime.now(timezone.utc) + timedelta(minutes=expire_minutes)
         to_encode.update({"exp": expire})
+
+        token_type = str(to_encode.get("token_type") or "session").lower()
+        uid = to_encode.get("id")
+        if single_session and token_type != "api" and uid:
+            sid = issue_session(str(uid))
+            to_encode["sid"] = sid
+            to_encode["token_type"] = "session"
+        elif "token_type" not in to_encode:
+            to_encode["token_type"] = token_type
+
         return jwt.encode(to_encode, self.__secret_key, algorithm=self.algorithm)
 
     def decode_access_token(self, token: str) -> dict:
         """Decode a JWT access token."""
         return jwt.decode(token, self.__secret_key, algorithms=[self.algorithm])
+
+    def invalidate_user_session(self, user_id: str | None) -> None:
+        clear_session(user_id)
 
     def create_jwt_middleware(
         self,
@@ -83,6 +110,18 @@ class JWTAuth:
                     return await handle_unauthorized_access(
                         request, "/logout", message="Account disabled"
                     )
+
+                # Single-session: web tokens must match the latest login
+                token_type = str(user.get("token_type") or "session").lower()
+                if token_type != "api":
+                    sid = user.get("sid")
+                    if not validate_session(user_id, sid):
+                        return await handle_unauthorized_access(
+                            request,
+                            "/logout",
+                            message="Session ended — you signed in elsewhere",
+                            code="SESSION_REPLACED",
+                        )
 
                 # Force password change: only allow limited endpoints
                 if rec and rec.get("must_change_password"):
@@ -159,12 +198,16 @@ class JWTAuth:
             request: web.Request,
             redirect_path: str,
             message: str = "Authentication required",
+            code: str | None = None,
         ) -> web.Response:
             """Handle unauthorized access cases."""
             accept_header = request.headers.get("Accept", "")
             if "text/html" in accept_header:
                 return web.HTTPFound(redirect_path)
             else:
-                return web.json_response({"error": message}, status=401)
+                body = {"error": message}
+                if code:
+                    body["code"] = code
+                return web.json_response(body, status=401)
 
         return jwt_middleware

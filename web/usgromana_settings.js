@@ -866,6 +866,7 @@ class usgromanaDialog extends ComfyDialog {
               ]
             : [
                 { id: "runs", label: "My Run Log", order: 0 },
+                { id: "queue", label: "Live Queue", order: 1 },
             ];
         
         // Combine and sort all tabs
@@ -893,7 +894,7 @@ class usgromanaDialog extends ComfyDialog {
         // Render Layout
         const title = fullAdmin
             ? "Krish RBAC · Security Policy"
-            : (canViewAllRuns ? "Krish RBAC · Dashboard & Runs" : "Krish RBAC · My Runs");
+            : (canViewAllRuns ? "Krish RBAC · Dashboard & Runs" : "Krish RBAC · My Runs & Queue");
         this.element.innerHTML = `
             <div class="usgromana-modal-header">
                 <span class="usgromana-modal-title">${escapeHtml(title)}</span>
@@ -941,8 +942,12 @@ class usgromanaDialog extends ComfyDialog {
             await this.renderAuditLog(this.element.querySelector("#usgromana-tab-audit"));
         }
         await this.renderRunLog(this.element.querySelector("#usgromana-tab-runs"), usersList);
-        if (fullAdmin || canViewAllRuns) {
-            await this.renderLiveQueue(this.element.querySelector("#usgromana-tab-queue"));
+        // Live Queue for everyone: admin/power can cancel; user is view-only
+        const queueEl = this.element.querySelector("#usgromana-tab-queue");
+        if (queueEl) {
+            await this.renderLiveQueue(queueEl, {
+                canCancel: !!(fullAdmin || canViewAllRuns),
+            });
         }
         
         // Fill Data - Extension tabs
@@ -2145,63 +2150,97 @@ async renderAuditLog(container) {
     await load();
 }
 
-async renderLiveQueue(container) {
+async renderLiveQueue(container, opts = {}) {
     if (!container) return;
+    const canCancel =
+        opts.canCancel !== undefined
+            ? !!opts.canCancel
+            : !!(
+                  currentUser?.is_admin ||
+                  currentUser?.role === "power" ||
+                  currentUser?.can_view_all_runs
+              );
+    const me = (currentUser?.username || "").toLowerCase();
+
     container.innerHTML = `
         <div class="usgromana-section">
             <h3>Live Queue</h3>
-            <p>All users' jobs. Admin/power can <strong>cancel</strong> any pending or running job.</p>
+            <p>${
+                canCancel
+                    ? "Server-wide job list. Admin/power can <strong>cancel</strong> any pending or running job."
+                    : "Server-wide job list (view only). You can see wait order — cancel is for admin/power only."
+            }</p>
             <button class="usgromana-btn secondary" id="usgromana-lq-refresh">Refresh</button>
             <div style="margin-top:12px;overflow:auto;max-height:480px;">
                 <table class="usgromana-table">
-                    <thead><tr><th>#</th><th>Status</th><th>User</th><th>Workflow</th><th>Job ID</th><th></th></tr></thead>
-                    <tbody id="usgromana-lq-tbody"><tr><td colspan="6">Loading…</td></tr></tbody>
+                    <thead><tr>
+                        <th>#</th><th>Status</th><th>User</th><th>Workflow</th><th>Job ID</th>
+                        ${canCancel ? "<th></th>" : ""}
+                    </tr></thead>
+                    <tbody id="usgromana-lq-tbody"><tr><td colspan="${canCancel ? 6 : 5}">Loading…</td></tr></tbody>
                 </table>
             </div>
         </div>`;
     const tbody = container.querySelector("#usgromana-lq-tbody");
+    const colSpan = canCancel ? 6 : 5;
     const load = async () => {
         try {
             const res = await fetch("/usgromana/api/workflow-runs/active", { credentials: "include" });
+            if (res.status === 401) {
+                const err = await res.json().catch(() => ({}));
+                if (err.code === "SESSION_REPLACED") {
+                    window.alert(err.error || "You signed in elsewhere. Please log in again.");
+                    window.location.href = "/logout";
+                    return;
+                }
+            }
             const data = res.ok ? await res.json() : { active: [] };
+            // Prefer server flag if present
+            const allowCancel = data.can_cancel !== undefined ? !!data.can_cancel : canCancel;
             const rows = data.active || [];
             if (!rows.length) {
-                tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;opacity:.7;">Queue empty</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="${colSpan}" style="text-align:center;opacity:.7;">Queue empty</td></tr>`;
                 return;
             }
             tbody.innerHTML = rows.map((r, i) => {
                 const jid = r.job_id || r.prompt_id || "";
-                return `<tr>
+                const isMine = (r.username || "").toLowerCase() === me;
+                const cancelCell = allowCancel
+                    ? `<td><button class="usgromana-btn usgromana-btn-danger btn-cancel-job" data-pid="${escapeHtml(String(jid))}">Cancel</button></td>`
+                    : "";
+                return `<tr style="${isMine ? "background:rgba(59,130,246,0.12);" : ""}">
                     <td>${i + 1}</td>
                     <td style="font-weight:600;color:${r.status === "running" ? "#6eb6ff" : "#e0c35a"};">${escapeHtml(r.status || "")}</td>
-                    <td><strong>${escapeHtml(r.username || "?")}</strong></td>
+                    <td><strong>${escapeHtml(r.username || "?")}</strong>${isMine ? ' <span style="font-size:10px;opacity:.7;">(you)</span>' : ""}</td>
                     <td>${escapeHtml(r.workflow_name || "")}</td>
                     <td><code style="font-size:11px;">${escapeHtml(String(jid).slice(0, 12))}${String(jid).length > 12 ? "…" : ""}</code></td>
-                    <td><button class="usgromana-btn usgromana-btn-danger btn-cancel-job" data-pid="${escapeHtml(String(jid))}">Cancel</button></td>
+                    ${cancelCell}
                 </tr>`;
             }).join("");
-            tbody.querySelectorAll(".btn-cancel-job").forEach(btn => {
-                btn.onclick = async () => {
-                    const pid = btn.dataset.pid;
-                    if (!pid || !confirm(`Cancel job ${pid}?`)) return;
-                    btn.disabled = true;
-                    const res2 = await fetch("/usgromana/api/queue/cancel", {
-                        method: "POST",
-                        credentials: "include",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ prompt_id: pid }),
-                    });
-                    const d = await res2.json().catch(() => ({}));
-                    if (!res2.ok) {
-                        alert(d.error || "Cancel failed");
-                        btn.disabled = false;
-                        return;
-                    }
-                    await load();
-                };
-            });
+            if (allowCancel) {
+                tbody.querySelectorAll(".btn-cancel-job").forEach(btn => {
+                    btn.onclick = async () => {
+                        const pid = btn.dataset.pid;
+                        if (!pid || !confirm(`Cancel job ${pid}?`)) return;
+                        btn.disabled = true;
+                        const res2 = await fetch("/usgromana/api/queue/cancel", {
+                            method: "POST",
+                            credentials: "include",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ prompt_id: pid }),
+                        });
+                        const d = await res2.json().catch(() => ({}));
+                        if (!res2.ok) {
+                            alert(d.error || "Cancel failed");
+                            btn.disabled = false;
+                            return;
+                        }
+                        await load();
+                    };
+                });
+            }
         } catch (e) {
-            tbody.innerHTML = `<tr><td colspan="6" style="color:#ff6b6b;">Failed to load queue</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="${colSpan}" style="color:#ff6b6b;">Failed to load queue</td></tr>`;
         }
     };
     container.querySelector("#usgromana-lq-refresh").onclick = () => load();

@@ -131,9 +131,58 @@ function applyComfyApiUser(uid) {
     }
 }
 
+/**
+ * If another login replaced this session, send the user to logout/login.
+ */
+function installSessionReplacedWatcher() {
+    if (window.__usgromanaSessionWatch) return;
+    window.__usgromanaSessionWatch = true;
+    const orig = window.fetch.bind(window);
+    window.fetch = async function (input, init) {
+        const res = await orig(input, init);
+        try {
+            if (res.status === 401) {
+                const url =
+                    typeof input === "string"
+                        ? input
+                        : input && input.url
+                          ? input.url
+                          : "";
+                // Only care about our API / protected JSON calls
+                if (
+                    url.includes("/usgromana/api/") ||
+                    url.includes("/prompt") ||
+                    url.includes("/api/")
+                ) {
+                    const clone = res.clone();
+                    const data = await clone.json().catch(() => ({}));
+                    if (data && data.code === "SESSION_REPLACED") {
+                        if (!window.__usgromanaSessionKick) {
+                            window.__usgromanaSessionKick = true;
+                            try {
+                                window.alert(
+                                    data.error ||
+                                        "You signed in elsewhere. This session has ended."
+                                );
+                            } catch {
+                                /* ignore */
+                            }
+                            window.location.href = "/logout";
+                        }
+                    }
+                }
+            }
+        } catch {
+            /* ignore */
+        }
+        return res;
+    };
+}
+
 app.registerExtension({
     name: "Usgromana.ComfyUserBridge",
     async init() {
+        installSessionReplacedWatcher();
         const uid = await loadComfyUserId();
         if (uid) {
             applyComfyApiUser(uid);
@@ -142,6 +191,7 @@ app.registerExtension({
         }
     },
     async setup() {
+        installSessionReplacedWatcher();
         installDenialToastWatcher();
         await loadComfyUserId();
         patchFetchApi();

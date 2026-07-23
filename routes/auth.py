@@ -123,10 +123,14 @@ async def post_login(request: web.Request) -> web.Response:
         
         user_env.get_user_workflow_dir("guest")
         
-        token = jwt_auth.create_access_token({"id": guest_id, "username": "guest"})
+        # Single session: new guest login invalidates previous guest sessions
+        token = jwt_auth.create_access_token(
+            {"id": guest_id, "username": "guest"},
+            single_session=True,
+        )
         sync_user_to_comfy_manager(guest_id, "guest")
         resp = web.json_response({"message": "Guest login", "jwt_token": token})
-        resp.set_cookie("jwt_token", token, httponly=True, samesite="Strict")
+        resp.set_cookie("jwt_token", token, httponly=True, samesite="Strict", path="/")
         logger.login_success(ip, "guest")
         timeout.remove_failed_attempts(ip)
         try:
@@ -151,7 +155,11 @@ async def post_login(request: web.Request) -> web.Response:
 
         user_env.get_user_workflow_dir(username)
 
-        token = jwt_auth.create_access_token({"id": user_id, "username": username})
+        # Single session: this login ends any previous session for the same user
+        token = jwt_auth.create_access_token(
+            {"id": user_id, "username": username},
+            single_session=True,
+        )
         sync_user_to_comfy_manager(user_id, username)
         must_change = bool(user_rec.get("must_change_password"))
         resp = web.json_response(
@@ -163,7 +171,7 @@ async def post_login(request: web.Request) -> web.Response:
                 "must_change_password": must_change,
             }
         )
-        resp.set_cookie("jwt_token", token, httponly=True, samesite="Strict")
+        resp.set_cookie("jwt_token", token, httponly=True, samesite="Strict", path="/")
         logger.login_success(ip, username)
         timeout.remove_failed_attempts(ip)
         try:
@@ -294,9 +302,15 @@ async def post_generate_token(request: web.Request) -> web.Response:
     if user_id and user_rec:
         timeout.remove_failed_attempts(ip)
         resolved_username = user_rec.get("username") or username
+        # API tokens do not kick web sessions (token_type=api, no single-session)
         token = jwt_auth.create_access_token(
-            {"id": user_id, "username": resolved_username},
+            {
+                "id": user_id,
+                "username": resolved_username,
+                "token_type": "api",
+            },
             expire_minutes=expire_hours * 60,
+            single_session=False,
         )
         secure_flag = request.headers.get("X-Forwarded-Proto", "http") == "https"
         response = web.json_response(
@@ -325,6 +339,15 @@ async def post_generate_token(request: web.Request) -> web.Response:
 
 @routes.get("/logout")
 async def get_logout(request: web.Request) -> web.Response:
+    # Clear this user's active session so the token cannot be reused
+    try:
+        token = jwt_auth.get_token_from_request(request)
+        if token:
+            payload = jwt_auth.decode_access_token(token)
+            if str(payload.get("token_type") or "session").lower() != "api":
+                jwt_auth.invalidate_user_session(payload.get("id"))
+    except Exception:
+        pass
     resp = web.HTTPFound("/login")
     resp.del_cookie("jwt_token", path="/")
     return resp
