@@ -338,9 +338,7 @@ const ADMIN_STYLES = `
     inset: 0;
     pointer-events: none;
     opacity: 0.06;  /* tweak if too bright/dim */
-    background-image:
-        url("/usgromana-web/assets/light_logo_transparent.png"),
-        url("/usgromana/assets/light_logo_transparent.png");
+    background-image: url("/usgromana/assets/dark_logo_transparent.png");
     background-repeat: no-repeat;
     background-position: center 35%;
     background-size: 420px auto;
@@ -357,9 +355,7 @@ const ADMIN_STYLES = `
     width: 120px;
     height: 40px;
     pointer-events: none;
-    background-image:
-        url("/usgromana-web/assets/light_logo_transparent.png"),
-        url("/usgromana/assets/light_logo_transparent.png");
+    background-image: url("/usgromana/assets/dark_logo_transparent.png");
     background-repeat: no-repeat;
     background-position: right center;
     background-size: contain;

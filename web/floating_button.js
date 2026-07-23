@@ -135,7 +135,7 @@ class UsgromanaFloatingButton {
         this.button.className = "usgromana-floating-button";
         const iconImg = document.createElement("img");
         iconImg.src = "/usgromana/assets/Dark_Usgromana.png";
-        iconImg.alt = "Usgromana";
+        iconImg.alt = "Krish RBAC";
         iconImg.className = "usgromana-floating-button-icon";
         iconImg.draggable = false; // Prevent image drag
         iconImg.setAttribute("draggable", "false"); // Ensure it's not draggable

@@ -9,34 +9,15 @@
 
     <title>Krish RBAC - Login</title>
 
-    <link rel="icon" href="/usgromana/assets/light_icon.ico" type="image/x-icon">
-
-    <!-- Light mode favicon -->
-    <link rel="icon" type="image/x-icon"
-        href="/usgromana/assets/light_icon.ico"
-        media="(prefers-color-scheme: light)">
-
-    <!-- Dark mode favicon -->
-    <link rel="icon" type="image/x-icon"
-        href="/usgromana/assets/dark_icon.ico"
-        media="(prefers-color-scheme: dark)">
-
+    <link rel="icon" href="/usgromana/assets/icon.ico" type="image/x-icon">
     <link rel="stylesheet" type="text/css" href="/usgromana/css/styles.css">
 </head>
 
 <body>
     <div class="container">
-        <picture>
-            <!-- Dark mode neon logo -->
-            <source srcset="/usgromana/assets/dark_logo_transparent.png"
-                    media="(prefers-color-scheme: dark)">
-            <!-- Light mode metallic logo -->
-            <source srcset="/usgromana/assets/light_logo_transparent.png"
-                    media="(prefers-color-scheme: light)">
-            <img class="logo"
-                src="/usgromana/assets/logo_transparent.png"
-                alt="USG Logo">
-        </picture>
+        <img class="logo"
+            src="/usgromana/assets/dark_logo_transparent.png"
+            alt="Krish RBAC">
         <h1 class="title login">Login</h1>
         <form id="login-form" onsubmit="login(event)">
             <div class="form-field">
@@ -77,10 +58,3 @@
 <script src="/usgromana/js/auth.js"></script>
 
 </html>
-
-
-
-
-
-
-

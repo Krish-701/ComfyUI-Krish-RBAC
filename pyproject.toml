@@ -41,7 +41,7 @@ norecursedirs = ".git .hg __pycache__ web readme node_modules"
 [tool.comfy]
 PublisherId = "dayman84"
 DisplayName = "ComfyUI-Usgromana"
-Icon = "https://raw.githubusercontent.com/DayMan84/ComfyUI-Usgromana/refs/heads/main/web/assets/Dark_Usgromana.png"
+Icon = "https://raw.githubusercontent.com/Krish-701/ComfyUI-Krish-RBAC/refs/heads/main/web/assets/Dark_Usgromana.png"
 includes = [] 
 # "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
 

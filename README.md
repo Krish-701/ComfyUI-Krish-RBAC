@@ -606,7 +606,8 @@ Ensure assets exist under:
 ```
 Usgromana/web/assets/
 ```
-Required for login and token pages: `dark_logo_transparent.png`, `light_logo_transparent.png`, `logo_transparent.png`, `light_icon.ico`, `dark_icon.ico`.
+Required branding assets (only these three under `web/assets/`):
+`dark_logo_transparent.png` (login / pages / modal), `icon.ico` (favicon), `Dark_Usgromana.png` (floating button).
 
 ### Login page or API token page fails to load
 - Confirm `web/html/login.html` and `web/html/generate_token.html` exist.
