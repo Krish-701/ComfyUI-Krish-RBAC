@@ -1,4 +1,4 @@
-# ComfyUI Usgromana
+# ComfyUI RBAC
 
 <p align="center">
   <img src="./web/assets/Dark_Usgromana.png" width="220" />
