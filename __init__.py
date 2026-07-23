@@ -20,12 +20,7 @@ from .globals import (
 from .utils import watcher
 from .utils.bootstrap import ensure_groups_config, ensure_default_admin, ensure_guest_user
 from .routes import static, auth, admin, user, workflow_routes
-from .utils.sfw_intercept.reactor_sfw_intercept import _load_reactor_module
-from .utils.sfw_intercept.nsfw_guard import (
-    should_block_image_for_current_user,
-    set_latest_prompt_user,
-)
-from .utils.sfw_intercept.node_interceptor import install_node_interceptor
+from .utils.sfw_intercept.nsfw_guard import set_latest_prompt_user
 from .utils.comfy_user_bridge import (
     install_comfy_user_bridge,
     create_comfy_user_middleware,
@@ -75,42 +70,11 @@ async def workflow_interceptor_middleware(request, handler):
     # Store for *HTTP* context: fall back to 'guest' only for HTTP-only checks
     current_username_var.set(username or "guest")
 
-    # --- USER CAPTURE FOR WORKER THREAD ---
+    # --- USER CAPTURE FOR WORKER THREAD (identity only — no content filter) ---
     if "prompt" in path and method in ("POST", "PUT"):
-        # Let nsfw_guard handle defaulting/guest logic.
         set_latest_prompt_user(username)
-        print(f"[Usgromana::Middleware] PROMPT CAPTURE path={path} user={username!r}")
 
-    # --- NSFW only (/view, /static_gallery): independent of assets visibility ---
-    if path == "/view" and method == "GET":
-        from .utils.media_paths import resolve_output_file_path
-
-        q = request.rel_url.query
-        filename = q.get("filename") or q.get("file") or q.get("name")
-        img_type = q.get("type", "output")
-        subfolder = q.get("subfolder") or ""
-
-        if filename and img_type == "output":
-            img_path = resolve_output_file_path(filename, subfolder)
-            if img_path and should_block_image_for_current_user(img_path):
-                return web.Response(status=403, text="NSFW Blocked")
-        elif filename and img_type == "temp":
-            from .utils.media_paths import resolve_temp_file_path
-
-            # Resolve under temp/<username>/ (same as output isolation)
-            img_path = resolve_temp_file_path(filename, subfolder)
-            if img_path and should_block_image_for_current_user(img_path):
-                return web.Response(status=403, text="NSFW Blocked")
-
-    # --- Case B: /static_gallery ---
-    if path.startswith("/static_gallery/") and method == "GET":
-        from .utils.media_paths import resolve_static_gallery_path
-
-        rel = path[len("/static_gallery/") :].lstrip("/\\")
-        img_path = resolve_static_gallery_path(rel)
-        if img_path and should_block_image_for_current_user(img_path):
-            return web.Response(status=403, text="NSFW Blocked")
-
+    # Content filtering disabled (uncensored mode) — /view and gallery always allowed.
     return await handler(request)
 
 # ---------------- Core middlewares ----------------
@@ -150,7 +114,7 @@ app.middlewares.append(access_control.create_queue_limit_middleware())
 app.middlewares.append(access_control.create_usgromana_middleware())
 watcher.register(app)
 
-install_node_interceptor()
+# Node-level NSFW interceptor intentionally NOT installed (uncensored mode).
 
 # Ensure routes are added to the app
 # In ComfyUI, instance.routes should be automatically added by PromptServer,

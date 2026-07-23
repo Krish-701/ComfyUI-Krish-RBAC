@@ -225,38 +225,24 @@ def is_available() -> bool:
 
 def is_sfw_enforced_for_user(username: Optional[str] = None) -> bool:
     """
-    Check if SFW (Safe For Work) restrictions are enforced for a user.
-    
-    Args:
-        username: Optional username to check. If None, checks the current session user.
-    
-    Returns:
-        bool: True if SFW is enforced (user should be blocked from NSFW), 
-              False if user is allowed to view NSFW content.
-    
-    Note:
-        Guest users always have SFW enforced (returns True) regardless of database settings.
-    
-    Example:
-        if is_sfw_enforced_for_user("john"):
-            # User 'john' has SFW restrictions
-            pass
+    SFW restrictions are fully disabled (uncensored Krish RBAC).
+    Always returns False for every user including guest.
     """
+    return False
+
+
+def _is_sfw_enforced_for_user_legacy_disabled(username: Optional[str] = None) -> bool:
+    """Legacy body kept only for reference — not used."""
     if not _NSFW_GUARD_AVAILABLE:
-        return False  # Fail open if extension not available
+        return False
     
     if username is None:
-        # Use current session context
         if _is_sfw_enforced_for_current_session:
             result = _is_sfw_enforced_for_current_session()
-            # For guests, always enforce SFW
-            current_user = get_current_user()
-            if (not current_user or current_user.lower() == "guest") and not result:
-                return True  # Force SFW enforcement for guests
             return result
-        return True  # Default to enforced if function not available
+        return False
     
-    # Guest users always have SFW enforced
+    # Guest users always have SFW enforced (legacy — disabled)
     if username and username.lower() == "guest":
         return True
     
@@ -270,55 +256,23 @@ def is_sfw_enforced_for_user(username: Optional[str] = None) -> bool:
 
 def check_tensor_nsfw(images_tensor, threshold: float = 0.5) -> bool:
     """
-    Check if an image tensor contains NSFW content.
-    
-    Args:
-        images_tensor: PyTorch tensor containing image data (shape: [batch, channels, height, width])
-        threshold: Confidence threshold for NSFW detection (default: 0.5)
-    
-    Returns:
-        bool: True if NSFW content is detected above threshold, False otherwise.
-              Returns False if SFW is not enforced for the current user.
-    
-    Example:
-        if check_tensor_nsfw(image_tensor):
-            # Replace with black image or block
-            image_tensor = torch.zeros_like(image_tensor)
+    Uncensored mode: never report NSFW for tensors.
     """
+    return False
+
+
+def _check_tensor_nsfw_legacy_disabled(images_tensor, threshold: float = 0.5) -> bool:
     if not _NSFW_GUARD_AVAILABLE:
-        return False  # Fail open
-    
-    if not TORCH_AVAILABLE or not PIL_AVAILABLE or not NUMPY_AVAILABLE:
-        print("[Usgromana API] Required dependencies (torch, PIL, numpy) not available")
-        return False  # Fail open
-    
-    # Get current user to check if guest
-    current_user = get_current_user()
-    is_guest = (not current_user or current_user.lower() == "guest")
-    
-    # First check if SFW is enforced for current user
-    # For guests, always check the image regardless of session state
-    if _is_sfw_enforced_for_current_session:
-        # Use quiet mode to avoid excessive logging during batch operations
-        try:
-            sfw_enforced = _is_sfw_enforced_for_current_session(quiet=True)
-        except TypeError:
-            # Fallback if quiet parameter not supported (older version)
-            sfw_enforced = _is_sfw_enforced_for_current_session()
-        # If not enforced and not a guest, skip check
-        if not sfw_enforced and not is_guest:
-            return False  # User is allowed, skip check
-        # For guests, always check even if session says not enforced
-    elif not is_guest:
-        # If we can't check and not a guest, fail open
         return False
     
-    # Get the NSFW detection pipeline
+    if not TORCH_AVAILABLE or not PIL_AVAILABLE or not NUMPY_AVAILABLE:
+        return False
+    
     if not _get_nsfw_pipeline:
-        return False  # Fail open if function not available
+        return False
     pipeline = _get_nsfw_pipeline()
     if pipeline is None:
-        return False  # Fail open if model not available
+        return False
     
     try:
         if images_tensor is None or len(images_tensor) == 0:
@@ -348,19 +302,13 @@ def check_tensor_nsfw(images_tensor, threshold: float = 0.5) -> bool:
 
 
 def check_image_path_nsfw(image_path: str, username: Optional[str] = None) -> bool:
+    """Uncensored mode: never block image paths."""
+    return False
+
+
+def _check_image_path_nsfw_legacy_disabled(image_path: str, username: Optional[str] = None) -> bool:
     """
-    Check if an image file contains NSFW content.
-    
-    Args:
-        image_path: Path to the image file
-        username: Optional username to check permissions for. If None, uses current session.
-    
-    Returns:
-        bool: True if image should be blocked (NSFW detected and user has restrictions),
-              False otherwise.
-    
-    Note:
-        Guest users always have their images checked, regardless of session state.
+    Legacy NSFW path check (disabled).
     
     Example:
         if check_image_path_nsfw("/output/image.png", "john"):
@@ -440,38 +388,18 @@ def check_image_path_nsfw(image_path: str, username: Optional[str] = None) -> bo
 
 
 def check_pil_image_nsfw(image, threshold: float = 0.5) -> bool:
-    """
-    Check if a PIL Image contains NSFW content.
-    
-    Args:
-        image: PIL Image object
-        threshold: Confidence threshold for NSFW detection (default: 0.5)
-    
-    Returns:
-        bool: True if NSFW content is detected above threshold, False otherwise.
-              Returns False if SFW is not enforced for the current user.
-    
-    Example:
-        pil_image = Image.open("image.png")
-        if check_pil_image_nsfw(pil_image):
-            # Block or replace image
-            pass
-    """
+    """Uncensored mode: never block PIL images."""
+    return False
+
+
+def _check_pil_image_nsfw_legacy_disabled(image, threshold: float = 0.5) -> bool:
     if not _NSFW_GUARD_AVAILABLE:
-        return False  # Fail open
+        return False
     
     if not PIL_AVAILABLE:
-        print("[Usgromana API] PIL (Pillow) not available")
-        return False  # Fail open
+        return False
     
-    # Get current user to check if guest
-    current_user = get_current_user()
-    is_guest = (not current_user or current_user.lower() == "guest")
-    
-    # First check if SFW is enforced for current user
-    # For guests, always check the image regardless of session state
     if _is_sfw_enforced_for_current_session:
-        # Use quiet mode to avoid excessive logging during batch operations
         try:
             sfw_enforced = _is_sfw_enforced_for_current_session(quiet=True)
         except TypeError:
@@ -562,33 +490,17 @@ def get_current_user() -> Optional[str]:
 
 
 def check_image_path_nsfw_fast(image_path: str, username: Optional[str] = None) -> Optional[bool]:
-    """
-    Fast tag-only check for NSFW content. Only checks cache, never scans.
-    Use this for bulk operations where you want instant results.
-    
-    Args:
-        image_path: Path to the image file
-        username: Optional username to check permissions for. If None, uses current session.
-    
-    Returns:
-        bool: True if NSFW (block), False if safe (allow), None if not tagged yet (needs scan)
-    
-    Example:
-        result = check_image_path_nsfw_fast("/output/image.png")
-        if result is None:
-            # Not tagged yet, do full scan or allow
-            result = check_image_path_nsfw("/output/image.png")
-        if result:
-            # Block the image
-            pass
-    """
+    """Uncensored mode: never block (False = allow)."""
+    return False
+
+
+def _check_image_path_nsfw_fast_legacy_disabled(image_path: str, username: Optional[str] = None) -> Optional[bool]:
     if not _NSFW_GUARD_AVAILABLE or not _get_nsfw_tag:
-        return None  # Can't check tags
+        return None
     
-    # Check if SFW is enforced
     if username is not None:
         if not is_sfw_enforced_for_user(username):
-            return False  # User allowed, don't block
+            return False
     else:
         current_user = get_current_user()
         is_guest = (not current_user or current_user.lower() == "guest")

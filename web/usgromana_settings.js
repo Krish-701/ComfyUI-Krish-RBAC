@@ -513,7 +513,6 @@ const ADMIN_STYLES = `
 .usgromana-users-table .col-name { min-width: 90px; max-width: 130px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .usgromana-users-table .col-user { min-width: 140px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
 .usgromana-users-table .col-role { width: 78px; min-width: 72px; max-width: 90px; }
-.usgromana-users-table .col-sfw { width: 48px; text-align: center; }
 .usgromana-users-table .col-created { min-width: 100px; font-size: 12px; opacity: 0.9; }
 .usgromana-users-table .col-actions { min-width: 220px; white-space: nowrap; }
 .usgromana-users-table .usgromana-btn {
@@ -1071,7 +1070,6 @@ renderUsers(list, container, opts = {}) {
             const isSelf = currentName && uname === currentName;
             const isGuest = uname.toLowerCase() === "guest";
             const isLockedAdmin = uname.toLowerCase() === LOCKED_ADMIN;
-            const sfwEnabled = u.sfw_check !== false;
             const isDisabled = !!u.disabled;
             const mustPw = !!u.must_change_password;
             const created = formatCreated(u.created_at);
@@ -1118,9 +1116,6 @@ renderUsers(list, container, opts = {}) {
                 </td>
                 <td class="col-user" title="${escapeHtml(email || "")}">${email ? escapeHtml(email) : '<span style="opacity:.5;">—</span>'}</td>
                 <td class="col-role">${roleCell}</td>
-                <td class="col-sfw">
-                    <input type="checkbox" class="usgromana-sfw-toggle" data-user="${escapeHtml(uname)}" ${sfwEnabled ? "checked" : ""} title="SFW check" />
-                </td>
                 <td class="col-created" title="${escapeHtml(u.created_at || "")}">${escapeHtml(created)}</td>
                 <td class="col-actions">${actions}</td>
             </tr>`;
@@ -1128,7 +1123,7 @@ renderUsers(list, container, opts = {}) {
         .join("");
 
     if (!rows) {
-        rows = `<tr><td colspan="7" style="opacity:.7;padding:20px;text-align:center;">No users found.</td></tr>`;
+        rows = `<tr><td colspan="6" style="opacity:.7;padding:20px;text-align:center;">No users found.</td></tr>`;
     }
 
     container.innerHTML = `
@@ -1176,7 +1171,6 @@ renderUsers(list, container, opts = {}) {
                             <th class="col-name sortable" data-sort="name" title="Sort by name">${sortMode === "name_za" ? "Name ↓" : "Name ↑"}</th>
                             <th class="col-user">User (email)</th>
                             <th class="col-role">Role</th>
-                            <th class="col-sfw">SFW</th>
                             <th class="col-created sortable" data-sort="created" title="Sort by last created">${sortMode === "created_old" ? "Last create ↑" : sortMode === "created_new" ? "Last create ↓" : "Last create"}</th>
                             <th class="col-actions">Actions</th>
                         </tr>
@@ -1333,16 +1327,14 @@ renderUsers(list, container, opts = {}) {
                 container.querySelector(`input.usgromana-role-select[data-user="${u}"]`);
             const g = roleEl ? roleEl.value : "user";
 
-            const sfwCheckbox = container.querySelector(`.usgromana-sfw-toggle[data-user="${u}"]`);
-            const sfw = sfwCheckbox ? sfwCheckbox.checked : true;
-
             btn.innerText = "Saving…";
             try {
                 const res = await api.fetchApi(`/usgromana/api/users/${u}`, {
                     method: "PUT",
                     body: JSON.stringify({
                         groups: [g],
-                        sfw_check: sfw,
+                        // SFW/NSFW content filter removed (uncensored mode)
+                        sfw_check: false,
                     }),
                 });
                 if (res && res.status && res.status >= 400) {
@@ -2601,7 +2593,7 @@ async renderRunLog(container, usersList) {
                 ${drawModeRow(
                     "Assets / Imports image visibility",
                     "assets_imports_visibility",
-                    "Who may see which files in Media → Assets (user-specific / all / none). Does not enable or disable NSFW filtering — that is per-user SFW on the Users tab and always applies to guests in the gallery."
+                    "Who may see which files in Media → Assets (user-specific / all / none). Content is not filtered (uncensored mode)."
                 )}
             </tbody>
         </table>

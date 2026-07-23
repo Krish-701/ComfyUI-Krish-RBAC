@@ -6,7 +6,6 @@ from aiohttp import web
 
 from ..globals import jwt_auth, current_username_var, users_db
 from ..utils import user_env
-from ..utils.sfw_intercept.nsfw_guard import should_block_image_for_current_user
 import folder_paths
 
 # 1. Determine Paths
@@ -421,13 +420,11 @@ async def delete_workflow(request, name: str | None):
 # --- 5. DISPATCHER / MIDDLEWARE ---
 async def middleware_dispatch(request):
     """
-    Intercepts workflow-related API calls and /prompt and /view.
+    Intercepts workflow-related API calls and /prompt.
 
     - For workflow paths, routes to list/save/load/delete.
-    - For /prompt, tags the current username in current_username_var
-      so other parts of Usgromana know which user is executing the prompt.
-    - For /view, applies global NSFW enforcement for SFW users
-      using utils.nsfw_guard.
+    - For /prompt, tags the current username (identity only).
+    - Content filtering is disabled (uncensored mode) — /view is never blocked.
     """
     path = request.path
     method = request.method
@@ -436,37 +433,14 @@ async def middleware_dispatch(request):
     if path.startswith("/usgromana-gallery"):
         return None
 
-    # Bypass only when explicitly enabled (e.g. debugging); not available in production by default
+    # Bypass only when explicitly enabled (e.g. debugging)
     if os.environ.get("USGROMANA_ALLOW_BYPASS", "").strip().lower() in ("1", "true", "yes") and request.query.get("bypass") == "true":
         return None
 
-    # --- Global NSFW enforcement on /view ---
+    # /view: no NSFW/SFW blocking — fall through to ComfyUI
     if path == "/view" and method == "GET":
         username = get_current_user(request)
         current_username_var.set(username)
-        print(f"[Usgromana] /view requested by user: {username!r}")
-
-        q = request.rel_url.query
-        filename = q.get("filename") or q.get("file") or q.get("name")
-        img_type = q.get("type", "output")
-
-        # Only guard standard output images for now
-        if filename and img_type == "output":
-            from ..utils.media_paths import resolve_output_file_path
-
-            subfolder = q.get("subfolder") or ""
-            img_path = resolve_output_file_path(filename, subfolder)
-
-            if img_path:
-                try:
-                    if should_block_image_for_current_user(img_path):
-                        # Hard global block for this user
-                        print(f"[Usgromana::NSFWGuard] Blocking NSFW image for user={username!r}: {img_path}")
-                        return web.Response(status=403, text="NSFW content blocked for this user.")
-                except Exception as e:
-                    print(f"[Usgromana::NSFWGuard] Error while checking {img_path}: {e}")
-
-        # Fall through to normal handler if not blocked
         return None
 
     # --- Workflow user-data endpoints ---
@@ -495,12 +469,10 @@ async def middleware_dispatch(request):
         elif method == "DELETE":
             return await delete_workflow(request, name=suffix)
 
-    # --- Intercept prompt execution to tag current username for SFW logic ---
+    # --- Prompt: identity only ---
     if path == "/prompt" and method in ("POST", "PUT"):
         username = get_current_user(request)
         current_username_var.set(username)
-        print(f"[Usgromana] /prompt tagged for user: {username!r}")
-        # Do not block; let the normal ComfyUI /prompt handler run
         return None
 
     return None

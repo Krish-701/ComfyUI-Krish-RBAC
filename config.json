@@ -14,5 +14,8 @@
     "manager_admin_only": true,
     "auto_enable_comfy_assets": true,
     "max_queue_jobs_per_user": 2,
-    "queue_limit_exempt_roles": ["admin", "power"]
+    "queue_limit_exempt_roles": ["admin", "power"],
+    "enable_nsfw_guard": false,
+    "enable_sfw_filter": false,
+    "content_filter_enabled": false
 }

@@ -1008,11 +1008,7 @@ class AccessControl:
                 if prompt_user:
                     try:
                         self.set_current_user_id(prompt_user, set_fallback=True)
-                        from .sfw_intercept.nsfw_guard import (
-                            tag_output_images_from_history,
-                        )
-
-                        tag_output_images_from_history(history_result)
+                        # NSFW tagging disabled (uncensored mode)
                         from .comfy_user_bridge import register_outputs_from_history
 
                         register_outputs_from_history(history_result, prompt_user)
