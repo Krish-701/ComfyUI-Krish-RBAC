@@ -703,8 +703,9 @@ async def api_workflow_runs_active(request):
     """
     Currently queued/running prompts with runner username, workflow, job id.
 
-    All authenticated users see the full live queue (so they know wait position).
-    Cancel is only for admin/power (or own jobs via cancel API for self).
+    Isolation:
+      - admin / power: full server queue + can cancel
+      - user / guest: **only their own jobs** (no other users' jobs/temp/output)
     """
     username, user_id, admin, role, can_view_all = _caller_identity(request)
     if not username:
@@ -713,13 +714,29 @@ async def api_workflow_runs_active(request):
     try:
         from ..globals import access_control
 
-        # Full server queue for everyone (read-only for regular users)
         active = access_control.get_active_runs_snapshot()
+
+        if not can_view_all:
+            # Hard isolation: never leak other users' jobs to normal accounts
+            uname = (username or "").lower()
+            filtered = []
+            for r in active:
+                if access_control._same_queue_user(r.get("user_id"), user_id):
+                    filtered.append(r)
+                    continue
+                if (r.get("username") or "").lower() == uname:
+                    filtered.append(r)
+                    continue
+                if access_control._same_queue_user(r.get("username"), username):
+                    filtered.append(r)
+            active = filtered
+
         # Normalize job_id alias
         for r in active:
             if "job_id" not in r:
                 r["job_id"] = r.get("prompt_id")
-        can_cancel = bool(can_view_all)  # admin/power only cancel any job from Live Queue
+
+        can_cancel = bool(can_view_all)
         return web.json_response(
             {
                 "active": active,

@@ -2178,37 +2178,45 @@ async renderAuditLog(container) {
 
 async renderLiveQueue(container, opts = {}) {
     if (!container) return;
+    const canViewAll = !!(
+        currentUser?.is_admin ||
+        currentUser?.role === "power" ||
+        currentUser?.can_view_all_runs
+    );
     const canCancel =
         opts.canCancel !== undefined
             ? !!opts.canCancel
-            : !!(
-                  currentUser?.is_admin ||
-                  currentUser?.role === "power" ||
-                  currentUser?.can_view_all_runs
-              );
+            : canViewAll;
     const me = (currentUser?.username || "").toLowerCase();
+
+    // Users: own jobs only. Admin/power: all users + cancel.
+    const showUserCol = canViewAll;
+    const colCount = 2 + (showUserCol ? 1 : 0) + 2 + (canCancel ? 1 : 0); // # status [user] workflow job [cancel]
 
     container.innerHTML = `
         <div class="usgromana-section">
             <h3>Live Queue</h3>
             <p>${
-                canCancel
+                canViewAll
                     ? "Server-wide job list. Admin/power can <strong>cancel</strong> any pending or running job."
-                    : "Server-wide job list (view only). You can see wait order — cancel is for admin/power only."
+                    : "Your jobs only (view). Other users' jobs are hidden. Cancel is admin/power only."
             }</p>
             <button class="usgromana-btn secondary" id="usgromana-lq-refresh">Refresh</button>
             <div style="margin-top:12px;overflow:auto;max-height:480px;">
                 <table class="usgromana-table">
                     <thead><tr>
-                        <th>#</th><th>Status</th><th>User</th><th>Workflow</th><th>Job ID</th>
+                        <th>#</th>
+                        <th>Status</th>
+                        ${showUserCol ? "<th>User</th>" : ""}
+                        <th>Workflow</th>
+                        <th>Job ID</th>
                         ${canCancel ? "<th></th>" : ""}
                     </tr></thead>
-                    <tbody id="usgromana-lq-tbody"><tr><td colspan="${canCancel ? 6 : 5}">Loading…</td></tr></tbody>
+                    <tbody id="usgromana-lq-tbody"><tr><td colspan="${colCount}">Loading…</td></tr></tbody>
                 </table>
             </div>
         </div>`;
     const tbody = container.querySelector("#usgromana-lq-tbody");
-    const colSpan = canCancel ? 6 : 5;
     const load = async () => {
         try {
             const res = await fetch("/usgromana/api/workflow-runs/active", { credentials: "include" });
@@ -2221,11 +2229,19 @@ async renderLiveQueue(container, opts = {}) {
                 }
             }
             const data = res.ok ? await res.json() : { active: [] };
-            // Prefer server flag if present
             const allowCancel = data.can_cancel !== undefined ? !!data.can_cancel : canCancel;
-            const rows = data.active || [];
+            const viewAll = data.can_view_all_runs !== undefined ? !!data.can_view_all_runs : canViewAll;
+            let rows = data.active || [];
+            // Client-side safety net: never show other users to non-privileged accounts
+            if (!viewAll) {
+                rows = rows.filter(
+                    (r) => (r.username || "").toLowerCase() === me
+                );
+            }
             if (!rows.length) {
-                tbody.innerHTML = `<tr><td colspan="${colSpan}" style="text-align:center;opacity:.7;">Queue empty</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="${colCount}" style="text-align:center;opacity:.7;">${
+                    viewAll ? "Queue empty" : "No jobs of yours in the queue"
+                }</td></tr>`;
                 return;
             }
             tbody.innerHTML = rows.map((r, i) => {
@@ -2234,10 +2250,13 @@ async renderLiveQueue(container, opts = {}) {
                 const cancelCell = allowCancel
                     ? `<td><button class="usgromana-btn usgromana-btn-danger btn-cancel-job" data-pid="${escapeHtml(String(jid))}">Cancel</button></td>`
                     : "";
-                return `<tr style="${isMine ? "background:rgba(59,130,246,0.12);" : ""}">
+                const userCell = viewAll
+                    ? `<td><strong>${escapeHtml(r.username || "?")}</strong>${isMine ? ' <span style="font-size:10px;opacity:.7;">(you)</span>' : ""}</td>`
+                    : "";
+                return `<tr style="${isMine && viewAll ? "background:rgba(59,130,246,0.12);" : ""}">
                     <td>${i + 1}</td>
                     <td style="font-weight:600;color:${r.status === "running" ? "#6eb6ff" : "#e0c35a"};">${escapeHtml(r.status || "")}</td>
-                    <td><strong>${escapeHtml(r.username || "?")}</strong>${isMine ? ' <span style="font-size:10px;opacity:.7;">(you)</span>' : ""}</td>
+                    ${userCell}
                     <td>${escapeHtml(r.workflow_name || "")}</td>
                     <td><code style="font-size:11px;">${escapeHtml(String(jid).slice(0, 12))}${String(jid).length > 12 ? "…" : ""}</code></td>
                     ${cancelCell}
@@ -2266,7 +2285,7 @@ async renderLiveQueue(container, opts = {}) {
                 });
             }
         } catch (e) {
-            tbody.innerHTML = `<tr><td colspan="${colSpan}" style="color:#ff6b6b;">Failed to load queue</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="${colCount}" style="color:#ff6b6b;">Failed to load queue</td></tr>`;
         }
     };
     container.querySelector("#usgromana-lq-refresh").onclick = () => load();

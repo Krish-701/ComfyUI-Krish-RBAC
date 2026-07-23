@@ -180,9 +180,16 @@ function ensureStatusBar() {
 
 function renderActiveBar(payload, queueStatus) {
     const bar = ensureStatusBar();
-    const active = payload?.active || [];
+    let active = payload?.active || [];
     const q = queueStatus || {};
     const parts = [];
+    const showAll = canReceiveLiveJobAlerts();
+    const me = (cachedMe?.username || "").toLowerCase();
+
+    // Regular users: never surface other accounts on the status bar
+    if (!showAll) {
+        active = active.filter((r) => (r.username || "").toLowerCase() === me);
+    }
 
     if (q.waiting_number != null && (q.active > 0 || active.length)) {
         parts.push(
@@ -193,10 +200,10 @@ function renderActiveBar(payload, queueStatus) {
 
     if (active.length) {
         const bits = active.slice(0, 3).map((r) => {
-            const who = r.username || "unknown";
+            const who = showAll ? r.username || "unknown" : "you";
             const wf = r.workflow_name || "Unnamed";
             const st = r.status === "running" ? "▶" : "…";
-            return `${st} ${who}: ${wf}`;
+            return showAll ? `${st} ${who}: ${wf}` : `${st} ${wf}`;
         });
         const more = active.length > 3 ? ` (+${active.length - 3})` : "";
         parts.push(`Queue · ${bits.join(" | ")}${more}`);
