@@ -366,10 +366,107 @@ function startPolling() {
     pollTimer = setInterval(pollActive, interval);
 }
 
+const SEED_MAX = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Re-roll seeds when control_after_generate is randomize/increment so
+ * user/power runs do not stick on one seed (template / multi-user quirk).
+ */
+function applySeedControlsToPrompt(body) {
+    if (!body || typeof body !== "object") return;
+    const prompt = body.prompt || body.output;
+    if (!prompt || typeof prompt !== "object") return;
+
+    const seedKeys = ["seed", "noise_seed", "noiseSeed", "rand_seed"];
+    for (const node of Object.values(prompt)) {
+        if (!node || typeof node !== "object") continue;
+        const inputs = node.inputs;
+        if (!inputs || typeof inputs !== "object") continue;
+
+        const ctrl = String(
+            inputs.control_after_generate ??
+                inputs.control_before_generate ??
+                inputs.seed_mode ??
+                ""
+        ).toLowerCase();
+
+        for (const sk of seedKeys) {
+            if (!(sk in inputs) || typeof inputs[sk] === "object") continue;
+            if (ctrl === "randomize" || ctrl === "random") {
+                inputs[sk] = Math.floor(Math.random() * SEED_MAX);
+            } else if (ctrl === "increment" || ctrl === "inc") {
+                const cur = Number(inputs[sk]) || 0;
+                inputs[sk] = (cur + 1) % (SEED_MAX + 1);
+            } else if (ctrl === "decrement" || ctrl === "dec") {
+                const cur = Number(inputs[sk]) || 0;
+                inputs[sk] = (cur - 1 + SEED_MAX + 1) % (SEED_MAX + 1);
+            }
+        }
+    }
+}
+
+/** Update on-canvas seed widgets after a successful queue so the next run advances. */
+function advanceGraphSeedWidgets() {
+    try {
+        const nodes = app?.graph?._nodes || [];
+        for (const node of nodes) {
+            const widgets = node.widgets || [];
+            if (!widgets.length) continue;
+
+            let seedWidgets = [];
+            let ctrlWidget = null;
+            for (const w of widgets) {
+                const n = String(w?.name || "").toLowerCase();
+                if (n === "seed" || n === "noise_seed" || n === "noiseseed") {
+                    seedWidgets.push(w);
+                }
+                if (
+                    n.includes("control_after_generate") ||
+                    n.includes("control_before_generate") ||
+                    n === "seed_mode"
+                ) {
+                    ctrlWidget = w;
+                }
+            }
+            if (!seedWidgets.length) continue;
+
+            const mode = String(ctrlWidget?.value ?? "fixed").toLowerCase();
+            for (const seedW of seedWidgets) {
+                let next = seedW.value;
+                if (mode === "randomize" || mode === "random") {
+                    next = Math.floor(Math.random() * SEED_MAX);
+                } else if (mode === "increment" || mode === "inc") {
+                    next = (Number(seedW.value) || 0) + 1;
+                } else if (mode === "decrement" || mode === "dec") {
+                    next = (Number(seedW.value) || 0) - 1;
+                } else {
+                    continue; // fixed
+                }
+                seedW.value = next;
+                try {
+                    if (typeof seedW.callback === "function") seedW.callback(next);
+                } catch {
+                    /* ignore */
+                }
+            }
+        }
+        app.graph?.setDirtyCanvas?.(true, true);
+    } catch {
+        /* ignore DOM / graph differences */
+    }
+}
+
 function tagPromptPayload(body) {
     if (!body || typeof body !== "object") return body;
     const workflowName = getWorkflowName();
     const username = cachedMe?.username || null;
+
+    // Ensure seeds advance for randomize/increment modes
+    try {
+        applySeedControlsToPrompt(body);
+    } catch {
+        /* ignore */
+    }
 
     if (!body.extra_data || typeof body.extra_data !== "object") {
         body.extra_data = {};
@@ -455,6 +552,8 @@ function installQueueHooks() {
                             data = null;
                         }
                         if (res.ok) {
+                            // Advance on-canvas seed widgets for next run (user/power fix)
+                            advanceGraphSeedWidgets();
                             showToast(
                                 formatQueueMessage(workflowName, username, data),
                                 "info"

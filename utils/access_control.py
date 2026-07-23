@@ -4,11 +4,23 @@ import json
 import heapq
 import copy
 import contextvars
+import random
 from aiohttp import web
 import folder_paths
 from server import PromptServer
 from execution import PromptQueue, MAXIMUM_HISTORY_SIZE
 from .users_db import UsersDB
+
+# Seed fields that must re-roll when control_after_generate is randomize/increment
+_SEED_INPUT_KEYS = ("seed", "noise_seed", "noiseSeed", "rand_seed", "rng_seed")
+_SEED_CONTROL_KEYS = (
+    "control_after_generate",
+    "control_before_generate",
+    "seed_mode",
+    "seedMode",
+)
+# Max seed used by ComfyUI JS (safe integer range)
+_SEED_MAX = (1 << 53) - 1
 
 # Map Permission Keys -> URL Paths to Block
 EXTENSION_BLOCK_MAP = {
@@ -467,25 +479,106 @@ class AccessControl:
         """
         On each prompt: force all save paths into the current user's media root.
         Workflow-specified absolute/other locations are rewritten.
+        Also apply seed randomize/increment so multi-user runs don't stick on one seed.
         """
         folder = self.storage_folder_name()
-        if not folder:
-            return json_data
         if isinstance(json_data, dict):
-            for k, v in list(json_data.items()):
-                if k in ("filename_prefix", "output_path", "save_path") and isinstance(v, str):
-                    json_data[k] = self._sanitize_filename_prefix(v, folder)
-                elif k == "subfolder" and isinstance(v, str):
-                    # Keep relative subfolder only; strip user/output escapes
-                    json_data[k] = self._sanitize_filename_prefix(v, folder)
-                    if json_data[k] == "ComfyUI":
-                        json_data[k] = ""
-                else:
-                    self.add_user_specific_folder_paths(v)
+            # Apply seed control first (works even if folder is missing)
+            self._apply_seed_controls(json_data)
+            if folder:
+                for k, v in list(json_data.items()):
+                    if k in ("filename_prefix", "output_path", "save_path") and isinstance(v, str):
+                        json_data[k] = self._sanitize_filename_prefix(v, folder)
+                    elif k == "subfolder" and isinstance(v, str):
+                        # Keep relative subfolder only; strip user/output escapes
+                        json_data[k] = self._sanitize_filename_prefix(v, folder)
+                        if json_data[k] == "ComfyUI":
+                            json_data[k] = ""
+                    else:
+                        self.add_user_specific_folder_paths(v)
+            else:
+                for v in list(json_data.values()):
+                    if isinstance(v, (dict, list)):
+                        self.add_user_specific_folder_paths(v)
         elif isinstance(json_data, list):
             for item in json_data:
                 self.add_user_specific_folder_paths(item)
         return json_data
+
+    def _apply_seed_controls(self, node_or_prompt: dict) -> None:
+        """
+        Ensure seeds change when the workflow says randomize/increment.
+
+        Multi-user / template loads often leave a fixed seed number even when
+        control_after_generate is randomize — re-roll server-side so user/power
+        get a new seed every queue.
+        """
+        if not isinstance(node_or_prompt, dict):
+            return
+
+        # Comfy prompt shape: { "3": { "class_type": "...", "inputs": {...} }, ... }
+        # or a single node dict with "inputs"
+        inputs = node_or_prompt.get("inputs")
+        if isinstance(inputs, dict):
+            ctrl = None
+            for ck in _SEED_CONTROL_KEYS:
+                if ck in inputs and inputs[ck] is not None:
+                    ctrl = str(inputs[ck]).strip().lower()
+                    break
+            if ctrl in ("randomize", "random", "true"):
+                for sk in _SEED_INPUT_KEYS:
+                    if sk in inputs and not isinstance(inputs[sk], list):
+                        try:
+                            inputs[sk] = random.randint(0, _SEED_MAX)
+                        except Exception:
+                            pass
+            elif ctrl in ("increment", "inc", "+1"):
+                for sk in _SEED_INPUT_KEYS:
+                    if sk in inputs and not isinstance(inputs[sk], list):
+                        try:
+                            cur = int(inputs[sk])
+                            inputs[sk] = (cur + 1) % (_SEED_MAX + 1)
+                        except Exception:
+                            try:
+                                inputs[sk] = random.randint(0, _SEED_MAX)
+                            except Exception:
+                                pass
+            elif ctrl in ("decrement", "dec", "-1"):
+                for sk in _SEED_INPUT_KEYS:
+                    if sk in inputs and not isinstance(inputs[sk], list):
+                        try:
+                            cur = int(inputs[sk])
+                            inputs[sk] = (cur - 1) % (_SEED_MAX + 1)
+                        except Exception:
+                            pass
+
+        # Recurse into nested dict values that look like nodes (handled by parent walk)
+
+    def _same_queue_user(self, meta_user_id, current_user) -> bool:
+        """
+        Match queue ownership across UUID vs username identities.
+        JWT often uses UUID; job storage may use username after set_fallback.
+        """
+        if not meta_user_id or not current_user:
+            return False
+        a = str(meta_user_id)
+        b = str(current_user)
+        if a == b:
+            return True
+        try:
+            # Resolve both sides to username + user_id
+            def resolve(key: str):
+                uid, rec = self.users_db.get_user(user_id=key)
+                if not rec:
+                    uid, rec = self.users_db.get_user(username=key)
+                uname = (rec or {}).get("username") or key
+                return str(uid or key), str(uname)
+
+            a_id, a_name = resolve(a)
+            b_id, b_name = resolve(b)
+            return a_id == b_id or a_name.lower() == b_name.lower() or a == b_id or b == a_id
+        except Exception:
+            return False
 
     def patch_folder_paths(self):
         # Match ComfyUI Assets view: each user sees their own input/output/temp roots.
@@ -561,11 +654,11 @@ class AccessControl:
             return {"pending": 0, "running": 0, "active": 0}
         for item in self.__prompt_queue.currently_running.values():
             meta, _ = _usgromana_meta_from_queue_entry(item)
-            if meta.get("user_id") == user_id:
+            if self._same_queue_user(meta.get("user_id"), user_id):
                 running += 1
         for item in self.__prompt_queue.queue:
             meta, _ = _usgromana_meta_from_queue_entry(item)
-            if meta.get("user_id") == user_id:
+            if self._same_queue_user(meta.get("user_id"), user_id):
                 pending += 1
         return {
             "pending": pending,
@@ -624,7 +717,7 @@ class AccessControl:
 
         my_positions = []
         for idx, slot in enumerate(global_slots, start=1):
-            if slot.get("user_id") == uid:
+            if self._same_queue_user(slot.get("user_id"), uid):
                 my_positions.append(
                     {
                         "waiting_number": idx,
@@ -676,7 +769,14 @@ class AccessControl:
                     perms = cfg.get(role, {})
                     if perms.get("can_run") is False:
                         print(f"[AccessControl] Blocked execution for {current_user_id}")
-                        return
+                        raise QueueLimitExceeded(
+                            {
+                                "error": "Krish: Execution Denied",
+                                "code": "EXECUTION_DENIED",
+                            }
+                        )
+                except QueueLimitExceeded:
+                    raise
                 except Exception:
                     pass
 
@@ -950,13 +1050,15 @@ class AccessControl:
             for item in self.__prompt_queue.currently_running.values():
                 meta = item[-1] if isinstance(item[-1], dict) else None
                 if not can_view_all:
-                    if not meta or meta.get("user_id") != current_user:
+                    mid = meta.get("user_id") if isinstance(meta, dict) else None
+                    if not self._same_queue_user(mid, current_user):
                         continue
                 running.append(unwrap(item))
             for item in self.__prompt_queue.queue:
                 meta = item[-1] if isinstance(item[-1], dict) else None
                 if not can_view_all:
-                    if not meta or meta.get("user_id") != current_user:
+                    mid = meta.get("user_id") if isinstance(meta, dict) else None
+                    if not self._same_queue_user(mid, current_user):
                         continue
                 pending.append(unwrap(item))
             return (running, copy.deepcopy(pending))
@@ -1021,7 +1123,8 @@ class AccessControl:
                 i
                 for i in self.__prompt_queue.queue
                 if not (
-                    isinstance(i[-1], dict) and i[-1].get("user_id") == current_user
+                    isinstance(i[-1], dict)
+                    and self._same_queue_user(i[-1].get("user_id"), current_user)
                 )
             ]
             self.server.queue_updated()
@@ -1078,7 +1181,9 @@ class AccessControl:
                 if str(body_pid) != pid:
                     continue
                 owner = meta.get("user_id")
-                if not actor_can_view_all and owner != current_user:
+                if not actor_can_view_all and not self._same_queue_user(
+                    owner, current_user
+                ):
                     return {
                         "ok": False,
                         "error": "Not allowed to cancel this job",
@@ -1105,7 +1210,9 @@ class AccessControl:
                     if str(body_pid) != pid:
                         continue
                     owner = meta.get("user_id")
-                    if not actor_can_view_all and owner != current_user:
+                    if not actor_can_view_all and not self._same_queue_user(
+                        owner, current_user
+                    ):
                         return {
                             "ok": False,
                             "error": "Not allowed to cancel this job",
@@ -1213,7 +1320,9 @@ class AccessControl:
                 meta = item[-1] if isinstance(item[-1], dict) else None
                 if not meta:
                     continue
-                if not can_view_all and meta.get("user_id") != current_user:
+                if not can_view_all and not self._same_queue_user(
+                    meta.get("user_id"), current_user
+                ):
                     continue
                 if func(unwrap(item)):
                     self.__prompt_queue.queue.pop(i)
@@ -1232,7 +1341,8 @@ class AccessControl:
                 filtered = {
                     k: v
                     for k, v in self.__prompt_queue.history.items()
-                    if v.get("user_id") == user
+                    if self._same_queue_user(v.get("user_id"), user)
+                    or self._same_queue_user(v.get("username"), user)
                 }
             if prompt_id:
                 if prompt_id not in filtered:

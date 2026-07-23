@@ -36,6 +36,24 @@ def is_admin(request):
     except Exception:
         return False
 
+
+def is_power_or_admin(request):
+    """Admin or power role — for dashboard / ops views."""
+    if is_admin(request):
+        return True
+    token = jwt_auth.get_token_from_request(request)
+    if not token:
+        return False
+    try:
+        p = jwt_auth.decode_access_token(token)
+        _, u = users_db.get_user(p["username"])
+        if not u:
+            return False
+        groups = [str(g).lower() for g in (u.get("groups") or [])]
+        return "power" in groups or "admin" in groups or bool(u.get("admin"))
+    except Exception:
+        return False
+
 @routes.get("/usgromana/health")
 async def health(request):
     """Readiness/health check for reverse proxies and load balancers. Returns 200 when extension is loaded and users DB is readable."""
@@ -564,75 +582,16 @@ async def api_update_ip_lists(request):
 
 @routes.post("/usgromana/api/nsfw-management")
 async def api_nsfw_management(request):
-    """Admin-only NSFW management endpoints."""
+    # NSFW management UI removed — endpoint kept as soft-disabled for old clients
     if not is_admin(request):
         return web.json_response({"error": "Admin only"}, status=403)
-    
-    try:
-        data = await request.json()
-        action = data.get("action", "").strip()
-        
-        print(f"[Usgromana] NSFW management action: {action}")
-        
-        from ..utils.sfw_intercept.nsfw_guard import (
-            scan_all_images_in_output_directory,
-            fix_incorrectly_cached_tags,
-            clear_all_nsfw_tags
-        )
-        
-        # Run blocking operations in executor to avoid blocking the event loop
-        import asyncio
-        loop = asyncio.get_event_loop()
-        
-        if action == "scan_all":
-            force_rescan = bool(data.get("force_rescan", False))
-            print(f"[Usgromana] Starting scan_all (force_rescan={force_rescan}) in executor...")
-            result = await loop.run_in_executor(
-                None, 
-                scan_all_images_in_output_directory, 
-                force_rescan
-            )
-            print(f"[Usgromana] scan_all completed: {result}")
-            return web.json_response({
-                "status": "ok",
-                "message": f"Scanned {result['scanned']} images. Found {result['nsfw_found']} NSFW images.",
-                "stats": result
-            })
-        
-        elif action == "fix_incorrect":
-            print(f"[Usgromana] Starting fix_incorrect in executor...")
-            fixed_count = await loop.run_in_executor(
-                None,
-                fix_incorrectly_cached_tags
-            )
-            print(f"[Usgromana] fix_incorrect completed: {fixed_count} fixed")
-            return web.json_response({
-                "status": "ok",
-                "message": f"Fixed {fixed_count} incorrectly cached images.",
-                "fixed_count": fixed_count
-            })
-        
-        elif action == "clear_all_tags":
-            print(f"[Usgromana] Starting clear_all_tags in executor...")
-            cleared_count = await loop.run_in_executor(
-                None,
-                clear_all_nsfw_tags
-            )
-            print(f"[Usgromana] clear_all_tags completed: {cleared_count} cleared")
-            return web.json_response({
-                "status": "ok",
-                "message": f"Cleared NSFW tags from {cleared_count} images.",
-                "cleared_count": cleared_count
-            })
-        
-        else:
-            return web.json_response({"error": f"Unknown action: {action}"}, status=400)
-    
-    except Exception as e:
-        import traceback
-        print(f"[Usgromana] NSFW management error: {e}")
-        traceback.print_exc()
-        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response(
+        {
+            "error": "NSFW Management has been removed from Krish RBAC.",
+            "removed": True,
+        },
+        status=410,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1014,10 +973,10 @@ async def api_audit_log_export(request):
 @routes.get("/usgromana/api/dashboard")
 async def api_dashboard(request):
     """
-    Admin dashboard stats: online users, queue length, jobs/hour, top users.
+    Admin/power dashboard stats: online users, queue length, jobs/hour, top users.
     """
-    if not is_admin(request):
-        return web.json_response({"error": "Admin only"}, status=403)
+    if not is_power_or_admin(request):
+        return web.json_response({"error": "Admin or power only"}, status=403)
     try:
         from ..globals import access_control
         from ..utils.presence import list_online

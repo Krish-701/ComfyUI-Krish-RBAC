@@ -14,7 +14,7 @@ let groupsConfig = {};
  */
 window.UsgromanaAdminTabs = {
     _tabs: [],
-    _defaultOrder: ["dashboard", "users", "perms", "ui-defaults", "ip", "env", "runs", "audit", "nsfw"],
+    _defaultOrder: ["dashboard", "users", "perms", "ui-defaults", "ip", "env", "runs", "audit"],
     
     /**
      * Register a new tab in the admin panel.
@@ -826,9 +826,11 @@ class usgromanaDialog extends ComfyDialog {
         }
 
         const isAdmin = !!currentUser.is_admin;
-        const canViewAllRuns = !!(currentUser.can_view_all_runs || isAdmin || currentUser.role === "power");
-        // Admin: full policy UI. Power/user: Run Log only (scoped by role on the API).
+        const isPower = currentUser.role === "power" || (currentUser.groups || []).includes("power");
+        const canViewAllRuns = !!(currentUser.can_view_all_runs || isAdmin || isPower);
+        // Admin: full policy UI. Power: Dashboard + Run Log + Live Queue. User: own runs.
         const fullAdmin = isAdmin;
+        const showDashboard = fullAdmin || isPower || canViewAllRuns;
 
         let groups = null;
         let usersList = [];
@@ -848,6 +850,7 @@ class usgromanaDialog extends ComfyDialog {
         const extensionTabs = fullAdmin ? window.UsgromanaAdminTabs.getAll() : [];
         
         // Build tabs HTML (built-in tabs first, then extension tabs)
+        // NSFW Management tab removed completely
         const builtInTabs = fullAdmin
             ? [
                 { id: "dashboard", label: "Dashboard", order: 0 },
@@ -859,21 +862,21 @@ class usgromanaDialog extends ComfyDialog {
                 { id: "runs", label: "Run Log", order: 6 },
                 { id: "queue", label: "Live Queue", order: 7 },
                 { id: "audit", label: "Audit Log", order: 8 },
-                { id: "nsfw", label: "NSFW Management", order: 9 }
             ]
             : canViewAllRuns
             ? [
-                { id: "runs", label: "Run Log (All Users)", order: 0 },
-                { id: "queue", label: "Live Queue", order: 1 }
+                { id: "dashboard", label: "Dashboard", order: 0 },
+                { id: "runs", label: "Run Log (All Users)", order: 1 },
+                { id: "queue", label: "Live Queue", order: 2 },
               ]
             : [
-                { id: "runs", label: "My Run Log", order: 0 }
+                { id: "runs", label: "My Run Log", order: 0 },
             ];
         
         // Combine and sort all tabs
         const allTabs = [...builtInTabs, ...extensionTabs.map(t => ({ id: t.id, label: t.label, order: t.order }))];
         allTabs.sort((a, b) => a.order - b.order);
-        const defaultTabId = fullAdmin ? "dashboard" : "runs";
+        const defaultTabId = showDashboard ? "dashboard" : "runs";
         
         // Build tabs HTML - mark default tab as active
         // Escape tab.label to prevent XSS (tab.id is already validated during registration)
@@ -895,7 +898,7 @@ class usgromanaDialog extends ComfyDialog {
         // Render Layout
         const title = fullAdmin
             ? "Krish RBAC · Security Policy"
-            : (canViewAllRuns ? "Krish RBAC · Run Log & Queue" : "Krish RBAC · My Runs");
+            : (canViewAllRuns ? "Krish RBAC · Dashboard & Runs" : "Krish RBAC · My Runs");
         this.element.innerHTML = `
             <div class="usgromana-modal-header">
                 <span class="usgromana-modal-title">${escapeHtml(title)}</span>
@@ -930,15 +933,17 @@ class usgromanaDialog extends ComfyDialog {
         });
 
         // Fill Data - Built-in tabs (admin-only tabs skip for power/user)
+        if (showDashboard) {
+            const dashEl = this.element.querySelector("#usgromana-tab-dashboard");
+            if (dashEl) await this.renderDashboard(dashEl);
+        }
         if (fullAdmin) {
-            await this.renderDashboard(this.element.querySelector("#usgromana-tab-dashboard"));
             this.renderUsers(usersList, this.element.querySelector("#usgromana-tab-users"));
             this.renderPerms(this.element.querySelector("#usgromana-tab-perms"));
             await this.renderIpRules(this.element.querySelector("#usgromana-tab-ip"));
             this.renderUserEnv(this.element.querySelector("#usgromana-tab-env"), usersList);
             await this.renderUiDefaults(this.element.querySelector("#usgromana-tab-ui-defaults"));
             await this.renderAuditLog(this.element.querySelector("#usgromana-tab-audit"));
-            this.renderNsfwManagement(this.element.querySelector("#usgromana-tab-nsfw"));
         }
         await this.renderRunLog(this.element.querySelector("#usgromana-tab-runs"), usersList);
         if (fullAdmin || canViewAllRuns) {
@@ -2543,114 +2548,6 @@ async renderRunLog(container, usersList) {
     }
 
     await load();
-}
-
-renderNsfwManagement(container) {
-    container.innerHTML = `
-        <div class="usgromana-section">
-            <h3>NSFW Content Management</h3>
-            <p>
-                NSFW detection and tagging for files on disk. When a user has SFW enabled
-                (Users tab), tagged NSFW images are hidden from the Usgromana Gallery and
-                ComfyUI Media → Assets — this is separate from Default UI assets visibility.
-            </p>
-
-            <div class="usgromana-row" style="margin-top:16px; gap:8px; flex-wrap:wrap;">
-                <button class="usgromana-btn" id="usgromana-nsfw-scan-new">
-                    Scan New Images
-                </button>
-                <button class="usgromana-btn" id="usgromana-nsfw-scan-all">
-                    Force Rescan All Images
-                </button>
-                <button class="usgromana-btn secondary" id="usgromana-nsfw-fix">
-                    Fix Incorrect Tags
-                </button>
-                <button class="usgromana-btn danger" id="usgromana-nsfw-clear">
-                    Clear All Tags
-                </button>
-            </div>
-
-            <div style="margin-top:12px;">
-                <label class="usgromana-field-label">Operation Status / Results</label>
-                <textarea id="usgromana-nsfw-output" class="usgromana-textarea" readonly style="min-height:120px;"></textarea>
-            </div>
-
-            <div style="margin-top:12px; padding:12px; background:rgba(255,255,255,0.05); border-radius:6px;">
-                <h4 style="margin:0 0 8px 0; font-size:14px;">About NSFW Scanning</h4>
-                <ul style="margin:0; padding-left:20px; font-size:13px; opacity:0.9;">
-                    <li><strong>Scan New Images:</strong> Only scans images that don't have NSFW tags yet.</li>
-                    <li><strong>Force Rescan All:</strong> Clears all tags and rescans every image (slow, but thorough).</li>
-                    <li><strong>Fix Incorrect Tags:</strong> Removes tags from images incorrectly marked as NSFW.</li>
-                    <li><strong>Clear All Tags:</strong> Removes all NSFW metadata from images (forces rescan on next access).</li>
-                </ul>
-            </div>
-        </div>
-    `;
-
-    const scanNewBtn = container.querySelector("#usgromana-nsfw-scan-new");
-    const scanAllBtn = container.querySelector("#usgromana-nsfw-scan-all");
-    const fixBtn = container.querySelector("#usgromana-nsfw-fix");
-    const clearBtn = container.querySelector("#usgromana-nsfw-clear");
-    const output = container.querySelector("#usgromana-nsfw-output");
-
-    async function executeAction(action, params = {}) {
-        const btnMap = {
-            "scan_all": scanAllBtn,
-            "fix_incorrect": fixBtn,
-            "clear_all_tags": clearBtn
-        };
-        const btn = btnMap[action] || scanNewBtn;
-        
-        const originalText = btn.textContent;
-        btn.disabled = true;
-        btn.textContent = "Processing...";
-        output.value = `Executing ${action}...\n`;
-
-        try {
-            const body = { action, ...params };
-            if (action === "scan_all") {
-                body.force_rescan = false;
-            }
-            
-            const res = await api.fetchApi("/usgromana/api/nsfw-management", {
-                method: "POST",
-                body: JSON.stringify(body),
-            });
-
-            if (res.status === 200) {
-                const data = await res.json();
-                output.value = data.message || "Operation completed successfully.";
-                if (data.stats) {
-                    output.value += `\n\nStats:\n`;
-                    output.value += `  - Scanned: ${data.stats.scanned || 0}\n`;
-                    output.value += `  - NSFW Found: ${data.stats.nsfw_found || 0}\n`;
-                    output.value += `  - Errors: ${data.stats.errors || 0}\n`;
-                    output.value += `  - Total Images: ${data.stats.total_images || 0}`;
-                }
-                if (data.fixed_count !== undefined) {
-                    output.value += `\n\nFixed ${data.fixed_count} images.`;
-                }
-            } else {
-                const error = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-                output.value = `Error: ${error.error || `HTTP ${res.status}`}`;
-            }
-        } catch (e) {
-            console.error("[usgromana] NSFW management error:", e);
-            output.value = `Error: ${e.message || "See console for details."}`;
-        } finally {
-            btn.disabled = false;
-            btn.textContent = originalText;
-        }
-    }
-
-    scanNewBtn.onclick = () => executeAction("scan_all", { force_rescan: false });
-    scanAllBtn.onclick = () => executeAction("scan_all", { force_rescan: true });
-    fixBtn.onclick = () => executeAction("fix_incorrect");
-    clearBtn.onclick = () => {
-        if (window.confirm("Are you sure you want to clear ALL NSFW tags from all images? This cannot be undone.")) {
-            executeAction("clear_all_tags");
-        }
-    };
 }
 
     async renderUiDefaults(container) {
