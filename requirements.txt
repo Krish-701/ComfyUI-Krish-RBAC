@@ -1,3 +1,6 @@
+# Hard dependencies for ComfyUI-Krish-RBAC (auto-installed on ComfyUI startup).
+# Manual install (use the same Python as ComfyUI):
+#   python -m pip install -r requirements.txt
 aiohttp
 PyJWT
 bcrypt

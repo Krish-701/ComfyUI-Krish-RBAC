@@ -1,8 +1,8 @@
 # --- START OF FILE constants.py ---
 import os
 import json
+import secrets
 import warnings
-import uuid
 
 # --- Base Directories ---
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,7 +23,7 @@ def _load_config(path):
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            warnings.warn(f"[Usgromana] Failed to load config from {path}: {e}")
+            warnings.warn(f"[Krish RBAC] Failed to load config from {path}: {e}")
     return {}
 
 config_data = _load_config(CONFIG_FILE_PATH)
@@ -42,16 +42,63 @@ UI_DEFAULTS_FILE = os.path.join(CURRENT_DIR, "users", "usgromana_ui_defaults.jso
 WHITELIST_FILE = os.path.join(CURRENT_DIR, config_data.get("whitelist", "users/whitelist.txt"))
 BLACKLIST_FILE = os.path.join(CURRENT_DIR, config_data.get("blacklist", "users/blacklist.txt"))
 LOG_FILE = os.path.join(CURRENT_DIR, config_data.get("log", "usgromana.log"))
+SECRET_KEY_FILE = os.path.join(CURRENT_DIR, "users", ".secret_key")
 
 # Create users/ layout only; never delete or replace live data files.
 ensure_users_data_layout(CURRENT_DIR, touch_files=[WHITELIST_FILE, BLACKLIST_FILE])
 
+
+def _resolve_secret_key() -> str:
+    """
+    Resolve JWT signing key in order:
+      1. Environment variable (config secret_key_env, default SECRET_KEY)
+      2. config.json \"secret_key\"
+      3. Persisted users/.secret_key (stable across restarts after git clone)
+      4. Generate + save a new key
+    """
+    env_name = config_data.get("secret_key_env", "SECRET_KEY") or "SECRET_KEY"
+    key = (os.getenv(env_name) or "").strip()
+    if key:
+        return key
+
+    cfg_key = config_data.get("secret_key")
+    if isinstance(cfg_key, str) and cfg_key.strip():
+        return cfg_key.strip()
+
+    try:
+        if os.path.isfile(SECRET_KEY_FILE):
+            with open(SECRET_KEY_FILE, "r", encoding="utf-8") as f:
+                stored = f.read().strip()
+            if stored:
+                return stored
+    except OSError as e:
+        warnings.warn(f"[Krish RBAC] Could not read secret key file: {e}")
+
+    # First run on this machine — generate once and persist so restarts keep sessions
+    key = secrets.token_hex(64)
+    try:
+        os.makedirs(os.path.dirname(SECRET_KEY_FILE), exist_ok=True)
+        with open(SECRET_KEY_FILE, "w", encoding="utf-8") as f:
+            f.write(key)
+        try:
+            os.chmod(SECRET_KEY_FILE, 0o600)
+        except OSError:
+            pass
+        print(
+            f"[Krish RBAC] Generated and saved SECRET_KEY to {SECRET_KEY_FILE} "
+            "(set env SECRET_KEY to override)."
+        )
+    except OSError as e:
+        warnings.warn(
+            f"[Krish RBAC] SECRET_KEY not set and could not persist key file ({e}). "
+            "Sessions may reset on restart."
+        )
+    return key
+
+
 # --- Configuration Values ---
 LOG_LEVELS = config_data.get("log_levels", ["INFO"])
-SECRET_KEY = os.getenv(config_data.get("secret_key_env", "SECRET_KEY"))
-if not SECRET_KEY:
-    warnings.warn("[Usgromana] SECRET_KEY not set. Using random key (logouts on restart).")
-    SECRET_KEY = "".join([str(uuid.uuid4().hex) for _ in range(128)])
+SECRET_KEY = _resolve_secret_key()
 
 TOKEN_EXPIRE_MINUTES = 60 * config_data.get("access_token_expiration_hours", 12)
 MAX_TOKEN_EXPIRE_MINUTES = 60 * config_data.get("max_access_token_expiration_hours", 8760)
