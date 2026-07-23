@@ -902,12 +902,18 @@ async def api_queue_cancel(request):
         from ..utils.audit_log import audit
         from ..utils.ip_filter import get_ip
 
-        # Ensure JWT user is bound for ownership checks
-        if user_id:
-            access_control.set_current_user_id(user_id, set_fallback=False)
+        # Bind identity for ownership checks; prefer username for folder keys
+        bind_key = username or user_id
+        if bind_key:
+            access_control.set_current_user_id(bind_key, set_fallback=False)
+
+        # Admin/power always privileged (re-check via access_control too)
+        privileged = bool(can_view_all) or access_control.user_can_view_all(
+            user_id
+        ) or access_control.user_can_view_all(username)
 
         result = access_control.cancel_job_by_prompt_id(
-            str(prompt_id), actor_can_view_all=can_view_all
+            str(prompt_id), actor_can_view_all=privileged
         )
         if not result.get("ok"):
             status = 404 if result.get("code") == "NOT_FOUND" else 403

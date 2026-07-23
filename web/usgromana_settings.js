@@ -2245,10 +2245,12 @@ async renderLiveQueue(container, opts = {}) {
                 return;
             }
             tbody.innerHTML = rows.map((r, i) => {
-                const jid = r.job_id || r.prompt_id || "";
+                const jid = String(r.job_id || r.prompt_id || "");
                 const isMine = (r.username || "").toLowerCase() === me;
-                const cancelCell = allowCancel
-                    ? `<td><button class="usgromana-btn usgromana-btn-danger btn-cancel-job" data-pid="${escapeHtml(String(jid))}">Cancel</button></td>`
+                const cancelCell = allowCancel && jid
+                    ? `<td><button type="button" class="usgromana-btn usgromana-btn-danger btn-cancel-job" data-pid="${escapeHtml(jid)}">Cancel</button></td>`
+                    : allowCancel
+                    ? `<td style="opacity:.5;font-size:11px;">—</td>`
                     : "";
                 const userCell = viewAll
                     ? `<td><strong>${escapeHtml(r.username || "?")}</strong>${isMine ? ' <span style="font-size:10px;opacity:.7;">(you)</span>' : ""}</td>`
@@ -2258,29 +2260,44 @@ async renderLiveQueue(container, opts = {}) {
                     <td style="font-weight:600;color:${r.status === "running" ? "#6eb6ff" : "#e0c35a"};">${escapeHtml(r.status || "")}</td>
                     ${userCell}
                     <td>${escapeHtml(r.workflow_name || "")}</td>
-                    <td><code style="font-size:11px;">${escapeHtml(String(jid).slice(0, 12))}${String(jid).length > 12 ? "…" : ""}</code></td>
+                    <td><code style="font-size:11px;" title="${escapeHtml(jid)}">${escapeHtml(jid.length > 12 ? jid.slice(0, 12) + "…" : jid)}</code></td>
                     ${cancelCell}
                 </tr>`;
             }).join("");
             if (allowCancel) {
                 tbody.querySelectorAll(".btn-cancel-job").forEach(btn => {
-                    btn.onclick = async () => {
-                        const pid = btn.dataset.pid;
-                        if (!pid || !confirm(`Cancel job ${pid}?`)) return;
-                        btn.disabled = true;
-                        const res2 = await fetch("/usgromana/api/queue/cancel", {
-                            method: "POST",
-                            credentials: "include",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ prompt_id: pid }),
-                        });
-                        const d = await res2.json().catch(() => ({}));
-                        if (!res2.ok) {
-                            alert(d.error || "Cancel failed");
-                            btn.disabled = false;
+                    btn.onclick = async (ev) => {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        const pid = btn.getAttribute("data-pid") || btn.dataset.pid;
+                        if (!pid) {
+                            alert("Missing job id — cannot cancel.");
                             return;
                         }
-                        await load();
+                        if (!confirm(`Cancel job ${pid}?`)) return;
+                        btn.disabled = true;
+                        btn.textContent = "Cancelling…";
+                        try {
+                            const res2 = await fetch("/usgromana/api/queue/cancel", {
+                                method: "POST",
+                                credentials: "include",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ prompt_id: pid, job_id: pid }),
+                            });
+                            const d = await res2.json().catch(() => ({}));
+                            if (!res2.ok) {
+                                alert(d.error || d.code || `Cancel failed (${res2.status})`);
+                                btn.disabled = false;
+                                btn.textContent = "Cancel";
+                                return;
+                            }
+                            await load();
+                        } catch (err) {
+                            console.error("[Krish] cancel failed", err);
+                            alert("Cancel failed. See console.");
+                            btn.disabled = false;
+                            btn.textContent = "Cancel";
+                        }
                     };
                 });
             }

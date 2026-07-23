@@ -789,27 +789,19 @@ class AccessControl:
         node_count = parsed.get("node_count") or 0
 
         # Tag extra_data so generated media / history can show the runner name
+        meta_tail = {
+            "user_id": current_user_id,
+            "username": username,
+            "storage_folder": self.storage_folder_name(username or current_user_id),
+            "workflow_name": workflow_name,
+            # Keep prompt_id on meta for reliable cancel matching
+            "prompt_id": str(prompt_id) if prompt_id is not None else None,
+        }
         if isinstance(item, tuple):
             item = _inject_runner_into_extra_data(item, username, workflow_name)
-            new_item = (
-                *item,
-                {
-                    "user_id": current_user_id,
-                    "username": username,
-                    "storage_folder": self.storage_folder_name(username or current_user_id),
-                    "workflow_name": workflow_name,
-                },
-            )
+            new_item = (*item, meta_tail)
         else:
-            new_item = (
-                item,
-                {
-                    "user_id": current_user_id,
-                    "username": username,
-                    "storage_folder": self.storage_folder_name(username or current_user_id),
-                    "workflow_name": workflow_name,
-                },
-            )
+            new_item = (item, meta_tail)
 
         max_jobs = self._queue_limit_for_user(current_user_id)
         # Atomic check + enqueue under the same lock as Comfy's queue
@@ -1072,10 +1064,13 @@ class AccessControl:
                     uname = meta.get("username") or _resolve_username_for_queue(
                         self.users_db, meta.get("user_id")
                     )
+                    pids = self._entry_prompt_ids(item)
+                    pid = pids[0] if pids else parsed.get("prompt_id")
                     out.append(
                         {
                             "status": "running",
-                            "prompt_id": parsed.get("prompt_id"),
+                            "prompt_id": pid,
+                            "job_id": pid,
                             "user_id": meta.get("user_id"),
                             "username": uname,
                             "workflow_name": meta.get("workflow_name")
@@ -1090,10 +1085,13 @@ class AccessControl:
                     uname = meta.get("username") or _resolve_username_for_queue(
                         self.users_db, meta.get("user_id")
                     )
+                    pids = self._entry_prompt_ids(item)
+                    pid = pids[0] if pids else parsed.get("prompt_id")
                     out.append(
                         {
                             "status": "queued",
-                            "prompt_id": parsed.get("prompt_id"),
+                            "prompt_id": pid,
+                            "job_id": pid,
                             "user_id": meta.get("user_id"),
                             "username": uname,
                             "workflow_name": meta.get("workflow_name")
@@ -1153,6 +1151,42 @@ class AccessControl:
         except Exception as e:
             print(f"[Usgromana] server interrupt: {e}")
 
+    def _entry_prompt_ids(self, entry) -> list[str]:
+        """Collect all known prompt_id strings for a queue entry (robust matching)."""
+        ids: list[str] = []
+        meta, body = _usgromana_meta_from_queue_entry(entry)
+        for cand in (
+            meta.get("prompt_id") if isinstance(meta, dict) else None,
+            body[1] if isinstance(body, tuple) and len(body) > 1 else None,
+        ):
+            if cand is not None and str(cand).strip():
+                s = str(cand).strip()
+                if s not in ids:
+                    ids.append(s)
+        try:
+            from .workflow_run_log import WorkflowRunLog
+
+            parsed = WorkflowRunLog.extract_prompt_meta(body if body else entry)
+            p = parsed.get("prompt_id")
+            if p is not None and str(p).strip() and str(p).strip() not in ids:
+                ids.append(str(p).strip())
+        except Exception:
+            pass
+        return ids
+
+    def _prompt_id_matches(self, entry, pid: str) -> bool:
+        """True if cancel target matches this entry (exact or unique prefix)."""
+        if not pid:
+            return False
+        target = str(pid).strip()
+        for cand in self._entry_prompt_ids(entry):
+            if cand == target:
+                return True
+            # UI may send a short display id; accept unambiguous prefixes
+            if len(target) >= 8 and (cand.startswith(target) or target.startswith(cand)):
+                return True
+        return False
+
     def cancel_job_by_prompt_id(self, prompt_id: str, *, actor_can_view_all: bool = False) -> dict:
         """
         Cancel a pending or running job by prompt_id.
@@ -1163,8 +1197,10 @@ class AccessControl:
         """
         if not prompt_id:
             return {"ok": False, "error": "Missing prompt_id"}
-        pid = str(prompt_id)
+        pid = str(prompt_id).strip()
         current_user = self.get_current_user_id()
+        # Re-check privilege from DB (admin/power always can cancel any job)
+        privileged = bool(actor_can_view_all) or self.current_user_can_view_all()
         found = None
         need_interrupt = False
         force_task_id = None
@@ -1172,14 +1208,11 @@ class AccessControl:
         with self.__prompt_queue.mutex:
             # 1) Pending queue — safe to remove immediately
             for i, item in enumerate(list(self.__prompt_queue.queue)):
-                meta, body = _usgromana_meta_from_queue_entry(item)
-                body_pid = body[1] if isinstance(body, tuple) and len(body) > 1 else None
-                if str(body_pid) != pid:
+                if not self._prompt_id_matches(item, pid):
                     continue
-                owner = meta.get("user_id")
-                if not actor_can_view_all and not self._same_queue_user(
-                    owner, current_user
-                ):
+                meta, body = _usgromana_meta_from_queue_entry(item)
+                owner = meta.get("user_id") if isinstance(meta, dict) else None
+                if not privileged and not self._same_queue_user(owner, current_user):
                     return {
                         "ok": False,
                         "error": "Not allowed to cancel this job",
@@ -1187,47 +1220,73 @@ class AccessControl:
                     }
                 self.__prompt_queue.queue.pop(i)
                 heapq.heapify(self.__prompt_queue.queue)
+                matched = self._entry_prompt_ids(item)
                 found = {
                     "ok": True,
                     "cancelled": "pending",
-                    "prompt_id": pid,
+                    "prompt_id": matched[0] if matched else pid,
                     "user_id": owner,
-                    "username": meta.get("username")
+                    "username": (meta.get("username") if isinstance(meta, dict) else None)
                     or _resolve_username_for_queue(self.users_db, owner),
-                    "workflow_name": meta.get("workflow_name") or "Unnamed workflow",
+                    "workflow_name": (meta.get("workflow_name") if isinstance(meta, dict) else None)
+                    or "Unnamed workflow",
                 }
                 break
 
             # 2) Running — only interrupt; worker must call task_done itself
             if not found:
                 for task_id, item in list(self.__prompt_queue.currently_running.items()):
-                    meta, body = _usgromana_meta_from_queue_entry(item)
-                    body_pid = body[1] if isinstance(body, tuple) and len(body) > 1 else None
-                    if str(body_pid) != pid:
+                    if not self._prompt_id_matches(item, pid):
                         continue
-                    owner = meta.get("user_id")
-                    if not actor_can_view_all and not self._same_queue_user(
-                        owner, current_user
-                    ):
+                    meta, body = _usgromana_meta_from_queue_entry(item)
+                    owner = meta.get("user_id") if isinstance(meta, dict) else None
+                    if not privileged and not self._same_queue_user(owner, current_user):
                         return {
                             "ok": False,
                             "error": "Not allowed to cancel this job",
                             "code": "FORBIDDEN",
                         }
+                    matched = self._entry_prompt_ids(item)
+                    real_pid = matched[0] if matched else pid
+                    self._cancelled_prompt_ids.add(str(real_pid))
                     self._cancelled_prompt_ids.add(pid)
                     need_interrupt = True
                     force_task_id = task_id
                     found = {
                         "ok": True,
                         "cancelled": "running",
-                        "prompt_id": pid,
+                        "prompt_id": real_pid,
                         "user_id": owner,
-                        "username": meta.get("username")
+                        "username": (meta.get("username") if isinstance(meta, dict) else None)
                         or _resolve_username_for_queue(self.users_db, owner),
-                        "workflow_name": meta.get("workflow_name") or "Unnamed workflow",
+                        "workflow_name": (meta.get("workflow_name") if isinstance(meta, dict) else None)
+                        or "Unnamed workflow",
                         "note": "Interrupt sent; slot frees when the worker stops (or after timeout)",
                     }
                     break
+
+            # 3) Privileged fallback: if only one running job and id still not found,
+            #    cancel that running job (admin/power "cancel current")
+            if not found and privileged and len(self.__prompt_queue.currently_running) == 1:
+                task_id, item = next(iter(self.__prompt_queue.currently_running.items()))
+                meta, body = _usgromana_meta_from_queue_entry(item)
+                owner = meta.get("user_id") if isinstance(meta, dict) else None
+                matched = self._entry_prompt_ids(item)
+                real_pid = matched[0] if matched else pid
+                self._cancelled_prompt_ids.add(str(real_pid))
+                need_interrupt = True
+                force_task_id = task_id
+                found = {
+                    "ok": True,
+                    "cancelled": "running",
+                    "prompt_id": real_pid,
+                    "user_id": owner,
+                    "username": (meta.get("username") if isinstance(meta, dict) else None)
+                    or _resolve_username_for_queue(self.users_db, owner),
+                    "workflow_name": (meta.get("workflow_name") if isinstance(meta, dict) else None)
+                    or "Unnamed workflow",
+                    "note": "Interrupted sole running job (admin/power fallback)",
+                }
 
             if found and found.get("cancelled") == "pending":
                 self.server.queue_updated()
