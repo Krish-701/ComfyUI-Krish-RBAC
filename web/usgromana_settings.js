@@ -2021,50 +2021,76 @@ async renderDashboard(container) {
                         </div>
                     </div>
 
-                    <h4 style="margin-top:8px;">Current online users</h4>
-                    <p style="font-size:12px;opacity:.7;margin:0 0 8px;">Users active in the last ~3 minutes (any ComfyUI request).</p>
-                    <div style="overflow:auto;max-height:220px;margin-bottom:14px;">
-                        <table class="usgromana-table">
-                            <thead>
-                                <tr>
-                                    <th>#</th>
-                                    <th>Username</th>
-                                    <th>Last seen</th>
-                                    <th>Status</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${
-                                    online.length
-                                        ? online
-                                              .map(
-                                                  (u, i) => `<tr>
-                                    <td>${i + 1}</td>
-                                    <td><strong>${escapeHtml(u.username || "")}</strong></td>
-                                    <td>${fmtAgo(u.seconds_ago)}</td>
-                                    <td style="color:#3dd68c;">● Online</td>
-                                </tr>`
-                                              )
-                                              .join("")
-                                        : `<tr><td colspan="4" style="text-align:center;opacity:.65;">No users online right now</td></tr>`
-                                }
-                            </tbody>
-                        </table>
+                    <div class="usgromana-row" style="display:flex;gap:16px;align-items:stretch;flex-wrap:wrap;margin-top:8px;">
+                        <div style="flex:1;min-width:280px;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px;background:rgba(0,0,0,0.12);">
+                            <h4 style="margin:0 0 4px;">Current online users</h4>
+                            <p style="font-size:12px;opacity:.7;margin:0 0 8px;">Active in the last ~3 minutes</p>
+                            <div style="overflow:auto;max-height:260px;">
+                                <table class="usgromana-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>Username</th>
+                                            <th>Last seen</th>
+                                            <th>Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${
+                                            online.length
+                                                ? online
+                                                      .map(
+                                                          (u, i) => `<tr>
+                                            <td>${i + 1}</td>
+                                            <td><strong>${escapeHtml(u.username || "")}</strong></td>
+                                            <td>${fmtAgo(u.seconds_ago)}</td>
+                                            <td style="color:#3dd68c;">● Online</td>
+                                        </tr>`
+                                                      )
+                                                      .join("")
+                                                : `<tr><td colspan="4" style="text-align:center;opacity:.65;">No users online right now</td></tr>`
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div style="flex:1;min-width:240px;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px;background:rgba(0,0,0,0.12);">
+                            <h4 style="margin:0 0 4px;">Top users (last hour)</h4>
+                            <p style="font-size:12px;opacity:.7;margin:0 0 8px;">Most jobs submitted recently</p>
+                            <div style="overflow:auto;max-height:260px;">
+                                <table class="usgromana-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>Username</th>
+                                            <th>Jobs</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${
+                                            top.length
+                                                ? top
+                                                      .map(
+                                                          (u, i) => `<tr>
+                                            <td>${i + 1}</td>
+                                            <td><strong>${escapeHtml(u.username || "")}</strong></td>
+                                            <td>${u.jobs}</td>
+                                        </tr>`
+                                                      )
+                                                      .join("")
+                                                : `<tr><td colspan="3" style="text-align:center;opacity:.65;">No jobs yet</td></tr>`
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
                     </div>
 
-                    <div class="usgromana-row" style="gap:16px;align-items:flex-start;flex-wrap:wrap;">
-                        <div style="flex:1;min-width:200px;">
-                            <h4>Top users (last hour)</h4>
-                            <ul style="margin:6px 0 0 16px;padding:0;">
-                                ${top.length ? top.map(u => `<li><b>${escapeHtml(u.username)}</b> — ${u.jobs} job(s)</li>`).join("") : "<li style='opacity:.6;'>No jobs yet</li>"}
-                            </ul>
-                        </div>
-                        <div style="flex:1;min-width:220px;">
-                            <h4>Active queue now</h4>
-                            <ul style="margin:6px 0 0 16px;padding:0;font-size:12px;">
-                                ${active.length ? active.slice(0, 12).map(r => `<li>${r.status === "running" ? "▶" : "…"} <b>${escapeHtml(r.username || "?")}</b> — ${escapeHtml(r.workflow_name || "")}</li>`).join("") : "<li style='opacity:.6;'>Queue empty</li>"}
-                            </ul>
-                        </div>
+                    <div style="margin-top:14px;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px;background:rgba(0,0,0,0.12);">
+                        <h4 style="margin:0 0 8px;">Active queue now</h4>
+                        <ul style="margin:0 0 0 16px;padding:0;font-size:12px;">
+                            ${active.length ? active.slice(0, 12).map(r => `<li>${r.status === "running" ? "▶" : "…"} <b>${escapeHtml(r.username || "?")}</b> — ${escapeHtml(r.workflow_name || "")}</li>`).join("") : "<li style='opacity:.6;'>Queue empty</li>"}
+                        </ul>
                     </div>
                     <button class="usgromana-btn secondary" id="usgromana-dash-refresh" style="margin-top:12px;">Refresh</button>
                     <small id="usgromana-dash-auto" class="usgromana-muted" style="margin-left:10px;">Auto-refresh 10s</small>
@@ -2190,7 +2216,7 @@ async renderLiveQueue(container, opts = {}) {
                 const err = await res.json().catch(() => ({}));
                 if (err.code === "SESSION_REPLACED") {
                     window.alert(err.error || "You signed in elsewhere. Please log in again.");
-                    window.location.href = "/logout";
+                    window.location.href = "/login?replaced=1";
                     return;
                 }
             }

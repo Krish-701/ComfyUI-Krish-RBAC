@@ -167,7 +167,9 @@ function installSessionReplacedWatcher() {
                             } catch {
                                 /* ignore */
                             }
-                            window.location.href = "/logout";
+                            // Go to /login (not /logout) so we only clear this
+                            // browser cookie and do not kill the new session.
+                            window.location.href = "/login?replaced=1";
                         }
                     }
                 }

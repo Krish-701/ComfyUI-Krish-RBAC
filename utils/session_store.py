@@ -50,3 +50,18 @@ def clear_session(user_id: str | None) -> None:
         return
     with _lock:
         _sessions.pop(key, None)
+
+
+def clear_session_if_match(user_id: str | None, sid: str | None) -> bool:
+    """
+    End the active session only if ``sid`` is the current one.
+    Prevents a stale/old browser from killing a newer login elsewhere.
+    """
+    key = str(user_id or "").strip()
+    if not key or not sid:
+        return False
+    with _lock:
+        if _sessions.get(key) == str(sid):
+            _sessions.pop(key, None)
+            return True
+    return False

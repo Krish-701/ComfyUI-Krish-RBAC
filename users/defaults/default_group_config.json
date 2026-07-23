@@ -19,6 +19,7 @@
         "ui_side_queue": true,
         "ui_side_workflows": true,
         "ui_side_templates": true,
+        "ui_side_assets": true,
         "ui_menu_templates": true
     },
     "user":  {
@@ -82,7 +83,7 @@
         "settings_impact": false,
         "ui_side_history": false,
         "ui_side_queue": true,
-        "ui_side_assets": false,
+        "ui_side_assets": true,
         "ui_side_templates": true,
         "settings_3d": false,
         "settings_user": false,

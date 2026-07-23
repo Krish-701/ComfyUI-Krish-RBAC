@@ -5,7 +5,12 @@ from datetime import datetime, timedelta, timezone
 from .users_db import UsersDB
 from .access_control import AccessControl
 from .logger import Logger
-from .session_store import issue_session, validate_session, clear_session
+from .session_store import (
+    issue_session,
+    validate_session,
+    clear_session,
+    clear_session_if_match,
+)
 
 
 class JWTAuth:
@@ -74,6 +79,12 @@ class JWTAuth:
     def invalidate_user_session(self, user_id: str | None) -> None:
         clear_session(user_id)
 
+    def invalidate_session_if_current(
+        self, user_id: str | None, sid: str | None
+    ) -> bool:
+        """Only clear store when this token is the active login."""
+        return clear_session_if_match(user_id, sid)
+
     def create_jwt_middleware(
         self,
         public: tuple = (),
@@ -116,9 +127,11 @@ class JWTAuth:
                 if token_type != "api":
                     sid = user.get("sid")
                     if not validate_session(user_id, sid):
+                        # Redirect to /login so stale cookie is cleared without
+                        # invalidating the newer session on another device.
                         return await handle_unauthorized_access(
                             request,
-                            "/logout",
+                            "/login?replaced=1",
                             message="Session ended — you signed in elsewhere",
                             code="SESSION_REPLACED",
                         )

@@ -37,10 +37,23 @@ def ensure_groups_config():
 
     # Add missing permission keys
     for role, perms in default_cfg.items():
+        if role not in current or not isinstance(current.get(role), dict):
+            current[role] = dict(perms)
+            changed = True
+            continue
         for key, value in perms.items():
             if key not in current[role]:
                 current[role][key] = value
                 changed = True
+
+    # Always enable Assets sidebar for user + power (requested)
+    for role in ("user", "power"):
+        if role not in current or not isinstance(current.get(role), dict):
+            current[role] = {}
+            changed = True
+        if current[role].get("ui_side_assets") is not True:
+            current[role]["ui_side_assets"] = True
+            changed = True
 
     if changed:
         save_json_file(GROUPS_CONFIG_FILE, current)

@@ -80,10 +80,33 @@ async def post_register(request: web.Request) -> web.Response:
 
 @routes.get("/login")
 async def get_login(request: web.Request) -> web.Response:
-    if not users_db.load_users(): return web.HTTPFound("/register")
-    if jwt_auth.get_token_from_request(request): return web.HTTPFound("/logout")
+    if not users_db.load_users():
+        return web.HTTPFound("/register")
+
     path = os.path.join(HTML_DIR, "login.html")
-    return web.FileResponse(path) if os.path.exists(path) else web.Response(text="login.html not found", status=404)
+    if not os.path.exists(path):
+        return web.Response(text="login.html not found", status=404)
+
+    token = jwt_auth.get_token_from_request(request)
+    if token:
+        # Valid current session → go into the app
+        try:
+            payload = jwt_auth.decode_access_token(token)
+            uid = payload.get("id")
+            sid = payload.get("sid")
+            token_type = str(payload.get("token_type") or "session").lower()
+            from ..utils.session_store import validate_session
+
+            if token_type == "api" or validate_session(uid, sid):
+                return web.HTTPFound("/")
+        except Exception:
+            pass
+        # Stale / replaced token: clear cookie only — do NOT kill the newer session
+        resp = web.FileResponse(path)
+        resp.del_cookie("jwt_token", path="/")
+        return resp
+
+    return web.FileResponse(path)
 
 
 @routes.get("/change_password")
@@ -339,13 +362,21 @@ async def post_generate_token(request: web.Request) -> web.Response:
 
 @routes.get("/logout")
 async def get_logout(request: web.Request) -> web.Response:
-    # Clear this user's active session so the token cannot be reused
+    """
+    Log out this browser.
+
+    Only invalidates the server session if this cookie is still the *active*
+    login. Stale cookies (replaced by a login elsewhere) only clear locally
+    so they cannot kick the new session.
+    """
     try:
         token = jwt_auth.get_token_from_request(request)
         if token:
             payload = jwt_auth.decode_access_token(token)
             if str(payload.get("token_type") or "session").lower() != "api":
-                jwt_auth.invalidate_user_session(payload.get("id"))
+                jwt_auth.invalidate_session_if_current(
+                    payload.get("id"), payload.get("sid")
+                )
     except Exception:
         pass
     resp = web.HTTPFound("/login")
