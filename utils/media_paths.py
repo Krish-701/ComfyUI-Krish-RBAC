@@ -127,6 +127,22 @@ def resolve_temp_file_path(
     )
 
 
+def resolve_input_file_path(
+    filename: str | None,
+    subfolder: str | None = None,
+) -> str | None:
+    """
+    Find a Load Image / upload under global input/ + per-user subfolders.
+
+    Load Image node previews request /view?type=input&filename=...
+    Files live at input/<username>/... for isolated users.
+    Admin/power may search all user input folders.
+    """
+    return _resolve_under_media_root(
+        global_input_directory(), filename, subfolder
+    )
+
+
 def _is_under(path: str, base: str) -> bool:
     path_abs = os.path.normcase(os.path.abspath(path))
     base_abs = os.path.normcase(os.path.abspath(base))

@@ -1715,14 +1715,19 @@ def _request_wants_generated_assets(request: web.Request) -> bool:
 
 async def _try_serve_user_view(request: web.Request, *, privileged: bool = False):
     """
-    Serve /view images from per-user output/ AND temp folders.
+    Serve /view images from per-user output, temp, AND input folders.
 
     Layout:
       output/<username>/...
-      temp/<username>/...   (PreviewImage etc.)
-    Admin/power scan all user subfolders for both types.
+      temp/<username>/...    (PreviewImage etc.)
+      input/<username>/...   (Load Image / uploads — previews use type=input)
+    Admin/power scan all user subfolders for these types.
     """
-    from .media_paths import resolve_output_file_path, resolve_temp_file_path
+    from .media_paths import (
+        resolve_input_file_path,
+        resolve_output_file_path,
+        resolve_temp_file_path,
+    )
 
     q = request.rel_url.query
     filename = q.get("filename") or q.get("file") or q.get("name")
@@ -1731,16 +1736,31 @@ async def _try_serve_user_view(request: web.Request, *, privileged: bool = False
     img_type = (q.get("type") or "output").lower()
     subfolder = q.get("subfolder") or ""
 
+    # Ensure path search knows who is viewing (username preferred)
+    try:
+        uid = request.get("user_id")
+        uname = request.get("user")
+        key = uname or uid
+        if key:
+            access_control.set_current_user_id(str(key), set_fallback=False)
+    except Exception:
+        pass
+
     path = None
     if img_type == "output":
         path = resolve_output_file_path(filename, subfolder)
     elif img_type == "temp":
-        # Critical: previews save under temp/<username>/ — admin must search all users
+        # Previews save under temp/<username>/
         path = resolve_temp_file_path(filename, subfolder)
+    elif img_type == "input":
+        # Load Image node: /view?type=input&filename=...
+        path = resolve_input_file_path(filename, subfolder)
     else:
-        # Unknown type: try both
-        path = resolve_output_file_path(filename, subfolder) or resolve_temp_file_path(
-            filename, subfolder
+        # Unknown type: try input, then output, then temp
+        path = (
+            resolve_input_file_path(filename, subfolder)
+            or resolve_output_file_path(filename, subfolder)
+            or resolve_temp_file_path(filename, subfolder)
         )
 
     if not path or not os.path.isfile(path):
@@ -1780,16 +1800,26 @@ def create_comfy_user_middleware():
             except Exception:
                 pass
 
-        can_view_all = bool(user_id and access_control.user_can_view_all(user_id))
-
-        # Only /view uses global media roots for privileged users (optional fallback).
-        # Do NOT enable this for /history or /queue — it breaks image path resolution.
-        media_paths = path == "/view" or path.rstrip("/").startswith("/api/view")
-        global_media_cm = (
-            use_global_media_root(True)
-            if (can_view_all and media_paths)
-            else nullcontext()
+        can_view_all = bool(
+            (user_id and access_control.user_can_view_all(user_id))
+            or (username and access_control.user_can_view_all(username))
         )
+
+        # Prefer username for per-user input/output/temp so Load Image previews work.
+        # (UUID keys still resolve, but uploads land under input/<username>/.)
+        view_key = username or user_id
+        if view_key and (
+            path == "/view"
+            or path.rstrip("/").startswith("/api/view")
+            or path.startswith("/upload")
+            or path.startswith("/api/upload")
+        ):
+            access_control.set_current_user_id(str(view_key), set_fallback=False)
+
+        # Do NOT force global media roots for /view — that breaks Load Image
+        # previews for power/admin when files live under input/<username>/.
+        # _try_serve_user_view resolves per-user paths correctly for all roles.
+        global_media_cm = nullcontext()
 
         if request.method == "GET" and path.rstrip("/") == "/api/assets":
             try:
