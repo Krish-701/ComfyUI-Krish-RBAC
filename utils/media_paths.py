@@ -107,29 +107,41 @@ def _resolve_under_media_root(
 def resolve_output_file_path(
     filename: str | None,
     subfolder: str | None = None,
+    *,
+    search_all_users: bool | None = None,
 ) -> str | None:
     """Find an output image under global output/ + per-user subfolders."""
     return _resolve_under_media_root(
-        global_output_directory(), filename, subfolder
+        global_output_directory(),
+        filename,
+        subfolder,
+        search_all_users=search_all_users,
     )
 
 
 def resolve_temp_file_path(
     filename: str | None,
     subfolder: str | None = None,
+    *,
+    search_all_users: bool | None = None,
 ) -> str | None:
     """
     Find a preview/temp image under global temp/ + per-user subfolders.
     Admin/power see all users' temp previews.
     """
     return _resolve_under_media_root(
-        global_temp_directory(), filename, subfolder
+        global_temp_directory(),
+        filename,
+        subfolder,
+        search_all_users=search_all_users,
     )
 
 
 def resolve_input_file_path(
     filename: str | None,
     subfolder: str | None = None,
+    *,
+    search_all_users: bool | None = None,
 ) -> str | None:
     """
     Find a Load Image / upload under global input/ + per-user subfolders.
@@ -138,9 +150,34 @@ def resolve_input_file_path(
     Files live at input/<username>/... for isolated users.
     Admin/power may search all user input folders.
     """
-    return _resolve_under_media_root(
-        global_input_directory(), filename, subfolder
+    # Try as given, then with empty subfolder (common Load Image case)
+    path = _resolve_under_media_root(
+        global_input_directory(),
+        filename,
+        subfolder,
+        search_all_users=search_all_users,
     )
+    if path:
+        return path
+    if subfolder:
+        path = _resolve_under_media_root(
+            global_input_directory(),
+            filename,
+            None,
+            search_all_users=search_all_users,
+        )
+        if path:
+            return path
+    # Filename may already be "username/file.png"
+    if filename and "/" in filename.replace("\\", "/"):
+        parts = filename.replace("\\", "/").split("/")
+        return _resolve_under_media_root(
+            global_input_directory(),
+            parts[-1],
+            "/".join(parts[:-1]),
+            search_all_users=search_all_users,
+        )
+    return None
 
 
 def _is_under(path: str, base: str) -> bool:

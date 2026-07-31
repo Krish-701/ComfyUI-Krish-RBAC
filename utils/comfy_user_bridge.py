@@ -1743,24 +1743,43 @@ async def _try_serve_user_view(request: web.Request, *, privileged: bool = False
         key = uname or uid
         if key:
             access_control.set_current_user_id(str(key), set_fallback=False)
+        if not privileged:
+            privileged = bool(
+                (uid and access_control.user_can_view_all(uid))
+                or (uname and access_control.user_can_view_all(uname))
+            )
     except Exception:
         pass
 
+    # Explicit search scope: admin/power = all users; others = own folder only
+    search_all = True if privileged else False
+
     path = None
     if img_type == "output":
-        path = resolve_output_file_path(filename, subfolder)
+        path = resolve_output_file_path(
+            filename, subfolder, search_all_users=search_all
+        )
     elif img_type == "temp":
-        # Previews save under temp/<username>/
-        path = resolve_temp_file_path(filename, subfolder)
-    elif img_type == "input":
+        path = resolve_temp_file_path(
+            filename, subfolder, search_all_users=search_all
+        )
+    elif img_type in ("input", "inputs"):
         # Load Image node: /view?type=input&filename=...
-        path = resolve_input_file_path(filename, subfolder)
+        path = resolve_input_file_path(
+            filename, subfolder, search_all_users=search_all
+        )
     else:
         # Unknown type: try input, then output, then temp
         path = (
-            resolve_input_file_path(filename, subfolder)
-            or resolve_output_file_path(filename, subfolder)
-            or resolve_temp_file_path(filename, subfolder)
+            resolve_input_file_path(
+                filename, subfolder, search_all_users=search_all
+            )
+            or resolve_output_file_path(
+                filename, subfolder, search_all_users=search_all
+            )
+            or resolve_temp_file_path(
+                filename, subfolder, search_all_users=search_all
+            )
         )
 
     if not path or not os.path.isfile(path):
