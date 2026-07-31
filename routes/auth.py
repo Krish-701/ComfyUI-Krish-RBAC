@@ -136,32 +136,15 @@ async def post_login(request: web.Request) -> web.Response:
             status=429,
         )
     
+    # Guest login is disabled
     if str(sanitized_data.get("guest_login", "false")).lower() == "true":
-        ensure_guest_user()
-        guest_id, guest_rec = users_db.get_user("guest")
-        if not guest_id:
-            return web.json_response({"error": "Guest disabled"}, status=500)
-        if guest_rec.get("disabled"):
-            return web.json_response({"error": "Guest account is disabled"}, status=403)
-        
-        user_env.get_user_workflow_dir("guest")
-        
-        # Single session: new guest login invalidates previous guest sessions
-        token = jwt_auth.create_access_token(
-            {"id": guest_id, "username": "guest"},
-            single_session=True,
+        return web.json_response(
+            {
+                "error": "Guest login is disabled. Please sign in with a username or email.",
+                "code": "GUEST_DISABLED",
+            },
+            status=403,
         )
-        sync_user_to_comfy_manager(guest_id, "guest")
-        resp = web.json_response({"message": "Guest login", "jwt_token": token})
-        resp.set_cookie("jwt_token", token, httponly=True, samesite="Strict", path="/")
-        logger.login_success(ip, "guest")
-        timeout.remove_failed_attempts(ip)
-        try:
-            from ..utils.presence import touch
-            touch("guest")
-        except Exception:
-            pass
-        return resp
 
     login_id = sanitized_data.get("username")  # username OR email
     password = sanitized_data.get("password")

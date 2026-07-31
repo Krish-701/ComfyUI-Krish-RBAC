@@ -1555,6 +1555,57 @@ def _created_at_epoch_ms(ref) -> int:
         return int(time.time() * 1000)
 
 
+def _safe_job_name_segment(name: str | None) -> str:
+    """Filesystem / id-safe short name for job ids."""
+    import re
+
+    raw = (name or "user").strip()
+    safe = re.sub(r"[^A-Za-z0-9_\-\.]", "_", raw).strip(" ._")
+    return safe or "user"
+
+
+def _username_for_asset_owner(owner_id: str | None, file_path: str | None = None) -> str:
+    """Resolve display username for the user who owns this generated asset."""
+    key = (owner_id or "").strip()
+    if key:
+        try:
+            from ..globals import users_db
+
+            uid, rec = users_db.get_user(user_id=key)
+            if rec and rec.get("username"):
+                return str(rec["username"])
+            uid, rec = users_db.get_user(username=key)
+            if rec and rec.get("username"):
+                return str(rec["username"])
+        except Exception:
+            pass
+        # owner_id may already be a username folder name
+        return key
+
+    # Infer from path: output/<username>/file.png
+    if file_path:
+        try:
+            from .media_paths import global_output_directory
+
+            root = global_output_directory()
+            rel = os.path.relpath(os.path.abspath(file_path), root).replace("\\", "/")
+            if not rel.startswith(".."):
+                first = rel.split("/")[0]
+                if first and first not in (".", ""):
+                    try:
+                        from ..globals import users_db
+
+                        _, rec = users_db.get_user(username=first)
+                        if rec and rec.get("username"):
+                            return str(rec["username"])
+                    except Exception:
+                        pass
+                    return first
+        except Exception:
+            pass
+    return "user"
+
+
 def _asset_summary_to_completed_job(item) -> dict | None:
     """Build a /api/jobs row so Comfy's Generated tab can render a disk-backed image."""
     ref = getattr(item, "ref", None)
@@ -1567,11 +1618,18 @@ def _asset_summary_to_completed_job(item) -> dict | None:
     if not filename:
         return None
     ref_id = getattr(ref, "id", None) or filename
+    owner_id = (getattr(ref, "owner_id", None) or "").strip()
+    file_path = getattr(ref, "file_path", None)
+    username = _username_for_asset_owner(owner_id, file_path)
+    who = _safe_job_name_segment(username)
+    # Job id shows who produced it: e.g. Krish-276265ed-9c9d-...
+    job_id = f"{who}-{ref_id}"
     return {
-        "id": f"usgromana-asset-{ref_id}",
+        "id": job_id,
         "status": "completed",
         "create_time": _created_at_epoch_ms(ref),
         "outputs_count": 1,
+        "username": username,
         "preview_output": {
             "filename": filename,
             "subfolder": subfolder,
