@@ -45,8 +45,16 @@ _log = logging.getLogger("usgromana.assets")
 _user_manager_patched = False
 _last_global_asset_sync = 0.0
 _last_output_index_sync = 0.0
+_last_full_repair_sync = 0.0
+_last_empty_list_log: dict[str, float] = {}
+_last_generated_merge_log = 0.0
+_last_generated_list_log = 0.0
 GLOBAL_ASSET_SYNC_INTERVAL_SEC = 45
-OUTPUT_INDEX_INTERVAL_SEC = 20
+OUTPUT_INDEX_INTERVAL_SEC = 30
+# Full disk walk + DB repair is expensive; do not run on every UI poll.
+FULL_REPAIR_INTERVAL_SEC = 120
+EMPTY_LIST_LOG_INTERVAL_SEC = 300
+NOISY_PRINT_INTERVAL_SEC = 120
 ALLOW_ALL_OUTPUT_WALK_MAX = 50000
 _OUTPUT_TAG_BACKFILL_MAX = 25000
 _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
@@ -760,7 +768,14 @@ def _repair_output_asset_registry(user_id: str | None = None) -> dict[str, int]:
     except Exception as e:
         _log.warning("Output asset registry repair failed: %s", e)
 
-    if any(stats.values()):
+    # disk_registered / tags_updated are often non-zero on every walk (re-touch).
+    # Only print when something actually changed in the registry.
+    meaningful = (
+        stats["missing_cleared"]
+        or stats["paths_fixed"]
+        or stats["duplicates_removed"]
+    )
+    if meaningful:
         print(
             f"[Usgromana::Assets] Repaired output registry under {root}: "
             f"registered={stats['disk_registered']} tags={stats['tags_updated']} "
@@ -768,6 +783,12 @@ def _repair_output_asset_registry(user_id: str | None = None) -> dict[str, int]:
             f"duplicates_removed={stats['duplicates_removed']}"
         )
         _log.info("Output asset registry repair: %s", stats)
+    else:
+        _log.debug(
+            "Output registry scan (no structural changes): registered=%s tags=%s",
+            stats["disk_registered"],
+            stats["tags_updated"],
+        )
     return stats
 
 
@@ -800,9 +821,26 @@ def schedule_output_registry_repair() -> None:
 
 def reset_global_asset_sync() -> None:
     """Force a full re-index on next allow_all asset list (e.g. after admin toggle)."""
-    global _last_global_asset_sync, _last_output_index_sync
+    global _last_global_asset_sync, _last_output_index_sync, _last_full_repair_sync
     _last_global_asset_sync = 0.0
     _last_output_index_sync = 0.0
+    _last_full_repair_sync = 0.0
+
+
+def _maybe_full_repair(user_id: str | None = None, *, force: bool = False) -> None:
+    """
+    Full output/ walk + tag repair, throttled so UI polling does not spam logs/CPU.
+
+    force=True still respects FULL_REPAIR_INTERVAL_SEC (admin toggle resets timers).
+    """
+    global _last_full_repair_sync, _last_output_index_sync, _last_global_asset_sync
+    now = time.time()
+    if now - _last_full_repair_sync < FULL_REPAIR_INTERVAL_SEC:
+        return
+    _last_full_repair_sync = now
+    _last_output_index_sync = now
+    _last_global_asset_sync = now
+    _repair_output_asset_registry(user_id=user_id)
 
 
 def _sync_global_assets_if_needed() -> None:
@@ -1028,34 +1066,33 @@ def _sync_user_output_assets(user_id: str, max_files: int = 2500) -> int:
 
 def _sync_allow_all_output(*, force: bool = False, user_id: str | None = None) -> None:
     """Index entire output/ tree + repair tags so Generated shows all historical images."""
-    global _last_output_index_sync, _last_global_asset_sync
-    now = time.time()
-    if not force and now - _last_output_index_sync < OUTPUT_INDEX_INTERVAL_SEC:
-        return
-    _last_output_index_sync = now
-    _last_global_asset_sync = now
-
-    _repair_output_asset_registry(user_id=user_id)
+    # force used to bypass throttle on every Assets poll — that flooded logs.
+    # Full repair is always interval-gated; admin toggle calls reset_global_asset_sync().
+    _maybe_full_repair(user_id, force=force)
 
 
 def _sync_output_index_if_needed(owner_id: str | None, *, force: bool = False) -> None:
     """Throttled: ensure output/ files are in the assets DB (Generated tab)."""
     global _last_output_index_sync
     now = time.time()
-    if not force and now - _last_output_index_sync < OUTPUT_INDEX_INTERVAL_SEC:
-        return
-    _last_output_index_sync = now
-
     mode = get_assets_imports_visibility()
     if mode == ASSETS_VISIBILITY_DISABLE_ALL:
         return
     if mode == ASSETS_VISIBILITY_ALLOW_ALL:
         _sync_allow_all_output(force=force, user_id=owner_id)
-    elif owner_id:
-        if force:
-            _repair_output_asset_registry(user_id=owner_id)
-        else:
-            _sync_user_output_assets(owner_id)
+        return
+
+    # user_specific: light per-user index (cheap). Full repair only on long interval.
+    if force:
+        _maybe_full_repair(owner_id, force=True)
+        return
+
+    if not owner_id:
+        return
+    if now - _last_output_index_sync < OUTPUT_INDEX_INTERVAL_SEC:
+        return
+    _last_output_index_sync = now
+    _sync_user_output_assets(owner_id)
 
 
 def sync_user_to_comfy_manager(user_id: str, username: str) -> None:
@@ -1263,11 +1300,13 @@ def _patch_asset_listing() -> None:
 
         if effective_allow_all:
             if wants_output:
-                _sync_allow_all_output(force=True, user_id=owner_id)
+                # Throttled full repair — not on every UI refresh.
+                _sync_allow_all_output(force=False, user_id=owner_id)
             else:
                 _sync_global_assets_if_needed()
         else:
-            _sync_output_index_if_needed(owner_id, force=wants_output)
+            # Light per-user index; full repair only on FULL_REPAIR_INTERVAL_SEC.
+            _sync_output_index_if_needed(owner_id, force=False)
         if mode == ASSETS_VISIBILITY_USER_SPECIFIC and owner_id and not privileged_viewer:
             _sync_user_input_assets(owner_id)
 
@@ -1277,15 +1316,20 @@ def _patch_asset_listing() -> None:
             result = _list_with_all_owners(**kwargs)
             filtered = _apply_nsfw_to_list_result(result, context="allow_all")
             if wants_output:
-                print(
-                    f"[Usgromana::Assets] Generated list: sql_total={result.total} "
-                    f"returned={len(filtered.items)} (excludes _thumbs)"
-                    f"{' [admin/power all-users]' if privileged_viewer else ''}"
-                )
-                if result.total and not filtered.items:
+                global _last_generated_list_log
+                now = time.time()
+                if now - _last_generated_list_log >= NOISY_PRINT_INTERVAL_SEC:
+                    _last_generated_list_log = now
                     print(
-                        "[Usgromana::Assets] Generated list empty after filters "
-                        f"(mode={mode}, user={owner_id or 'n/a'})"
+                        f"[Usgromana::Assets] Generated list: sql_total={result.total} "
+                        f"returned={len(filtered.items)} (excludes _thumbs)"
+                        f"{' [admin/power all-users]' if privileged_viewer else ''}"
+                    )
+                elif result.total and not filtered.items:
+                    _log.debug(
+                        "Generated list empty after filters (mode=%s, user=%s)",
+                        mode,
+                        owner_id or "n/a",
                     )
             return filtered
 
@@ -1310,14 +1354,20 @@ def _patch_asset_listing() -> None:
             filtered = _filter_items(wide.items, owner_id)[:limit]
         result = am.ListAssetsResult(items=filtered, total=max(len(filtered), result.total))
         filtered = _apply_nsfw_to_list_result(result, context="user_specific_wide")
+        # Empty Generated for a user is normal (no files under output/<user>/).
+        # Do not INFO-spam ComfyUI logs on every Assets poll.
         if wants_output and owner_id and not filtered.items:
-            _log.info(
-                "Assets list (user_specific, output): 0 items for user %s "
-                "(sql=%s, after visibility=%s); indexing output/",
-                owner_id,
-                len(result.items),
-                len(filtered.items),
-            )
+            now = time.time()
+            last = _last_empty_list_log.get(owner_id, 0.0)
+            if now - last >= EMPTY_LIST_LOG_INTERVAL_SEC:
+                _last_empty_list_log[owner_id] = now
+                _log.debug(
+                    "Assets list (user_specific, output): 0 items for user %s "
+                    "(sql=%s after path filter); expected if output/%s is empty",
+                    owner_id,
+                    len(result.items),
+                    owner_id,
+                )
         return filtered
 
     def get_asset_detail(reference_id: str, owner_id: str = ""):
@@ -1749,10 +1799,20 @@ def _merge_disk_outputs_into_jobs_payload(
         pagination["limit"] = limit
     pagination["offset"] = offset
 
-    print(
-        f"[Usgromana::Assets] Generated tab: merged {len(synthetic)} disk image(s) "
-        f"into /api/jobs (page size {len(page_jobs)})"
-    )
+    global _last_generated_merge_log
+    now = time.time()
+    if now - _last_generated_merge_log >= NOISY_PRINT_INTERVAL_SEC:
+        _last_generated_merge_log = now
+        print(
+            f"[Usgromana::Assets] Generated tab: merged {len(synthetic)} disk image(s) "
+            f"into /api/jobs (page size {len(page_jobs)})"
+        )
+    else:
+        _log.debug(
+            "Generated tab merge: %s disk image(s), page size %s",
+            len(synthetic),
+            len(page_jobs),
+        )
     return {**payload, "jobs": page_jobs, "pagination": pagination}
 
 
@@ -1922,10 +1982,11 @@ def create_comfy_user_middleware():
             if not _thumb_purge_done:
                 _thumb_purge_done = True
                 _purge_thumb_asset_references()
+            # Throttled index only — never full unthrottled repair on every poll.
             if assets_mode == ASSETS_VISIBILITY_ALLOW_ALL or can_view_all:
-                _sync_allow_all_output(force=True, user_id=user_id)
+                _sync_allow_all_output(force=False, user_id=user_id)
             elif user_id:
-                _repair_output_asset_registry(user_id=user_id)
+                _sync_output_index_if_needed(user_id, force=False)
 
         if (
             assets_mode == ASSETS_VISIBILITY_DISABLE_ALL
